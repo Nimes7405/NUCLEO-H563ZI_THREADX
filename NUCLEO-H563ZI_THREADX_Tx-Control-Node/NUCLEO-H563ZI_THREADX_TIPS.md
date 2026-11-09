@@ -235,3 +235,27 @@ USBX 专项经验仍保留在 USBX HID 工程的 `report.md` 与
    切换 offset/scale 后先重置，再让闭环重新收敛。
 6. **校准值先做运行时**：先把 `cal show/set/reset` 和默认路径验证通，再做
    Flash/EEPROM 掉电保持；不要一开始把写 Flash 和闭环调参混在一起。
+
+## 11. 片内 Flash 参数页经验（P4 校准掉电保存）
+
+1. **H5 的最后 8 KB（`0x081FE000–0x081FFFFF`）是 EDATA 区**，不是普通 Flash：
+   普通 `FLASH_TYPEPROGRAM_QUADWORD` 编程会失败、擦除报告 OK 但内容不变、
+   调试器读回 `0x00000000`。参数页要放在**前一个普通扇区**
+   （本工程用 `0x080FE000`，bank 1 sector 127）。
+2. **Secure 单镜像必须 `-mcmse`**。不加时 `__ARM_FEATURE_CMSE` 未定义，
+   HAL 的 `IS_FLASH_SECURE_OPERATION()` 恒假 → 写 `NSCR/NSKEYR` 操作安全 Flash，
+   结果是 `PGSERR`(0x40000)。加上 `-mcmse` 后 HAL 自动改用 `SECCR/SECKEYR`。
+3. **MPU 只读 Flash 会拦编程**：HAL 的 quad-word 编程是 4 次 CPU store，
+   会被 P3 的 Flash RO region 判成 `MemManage`(`CFSR=0x82`, `MMFAR=flash 地址`)。
+   编程前后临时 `ARM_MPU_Disable()`/`ARM_MPU_Enable(PRIVDEFENA)`，并确保
+   这段已经关中断（本工程在关中断窗口内完成擦+写+校验）。
+4. **擦除会阻塞取指**：8 KB 扇区擦除实测让 20 kHz ISR 停顿约 **2.0 ms**；
+   单条 16 B 编程只要 0.1–0.2 ms。设计上用「追加式日志」把擦除频率降到
+   512 次保存一次。
+5. **不要用 `%f`**：`--specs=nosys.specs` 默认 nano printf 不支持浮点，
+   要么加 `-u _printf_float`（体积代价大），要么按整数缩放打印
+   （本工程用 `offset=%ld.%02ld`）。
+6. **写 Flash 后重置健康统计**：一次性停顿会污染 `ovr`/`jit` 指标，
+   擦写完成后清空统计并打印 `pause_ms`，否则自检的 `ovr==0` 断言会误报。
+7. **链接脚本要预留参数区**：把 `FLASH` 长度从 2048K 收到 2032K、加 `PARAM`
+   段并导出 `_param_page_start` 符号，防止以后代码变大覆盖参数页。

@@ -25,6 +25,7 @@ echo "PASS release-build"
 make flash APP_PROFILE=release
 python3 scripts/serial_check.py --port "$PORT" --mode release
 python3 scripts/serial_check.py --port "$PORT" --mode control
+python3 scripts/serial_check.py --port "$PORT" --mode param
 python3 scripts/soak.py --port "$PORT" --seconds 60 --interval 5 --stack-interval 20
 
 echo "RELEASE CHECK PASS"

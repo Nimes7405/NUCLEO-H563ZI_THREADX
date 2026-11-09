@@ -20,6 +20,7 @@ int app_control_set_enabled(int on);
 void app_control_set_gains(float kp, float ki);
 void app_control_set_calibration(float offset, float scale);
 void app_control_get_calibration(float *offset, float *scale);
+void app_control_clear_stats(void);
 void app_control_reset_calibration(void);
 app_plant_mode_t app_control_get_plant(void);
 int32_t app_control_get_setpoint(void);

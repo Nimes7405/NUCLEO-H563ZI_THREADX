@@ -3,6 +3,7 @@
 #include "app_control.h"
 #include "app_fault.h"
 #include "app_log.h"
+#include "app_param.h"
 #include "app_stacks.h"
 #include "app_stacks.h"
 #include "app_watchdog.h"
@@ -171,9 +172,9 @@ void app_console_status(void)
 static void console_help(void)
 {
 #if APP_RELEASE
-  app_log_printf("HELP commands: status stack fault [clear] wdg log <text> set <0..4095> plant <sim|adc> ctrl <on|off> gain <kp> <ki> cal [show|set <offset> <scale>|reset]\r\n");
+  app_log_printf("HELP commands: status stack fault [clear] wdg log <text> set <0..4095> plant <sim|adc> ctrl <on|off> gain <kp> <ki> cal [show|set <offset> <scale>|reset|erase] reboot\r\n");
 #else
-  app_log_printf("HELP commands: status stack fault [clear] wdg log <text> set <0..4095> plant <sim|adc> ctrl <on|off> gain <kp> <ki> cal [show|set <offset> <scale>|reset] guard stall <0|1|2|3|4> crash reboot\r\n");
+  app_log_printf("HELP commands: status stack fault [clear] wdg log <text> set <0..4095> plant <sim|adc> ctrl <on|off> gain <kp> <ki> cal [show|set <offset> <scale>|reset|erase] reboot guard stall <0|1|2|3|4> crash\r\n");
 #endif
 }
 
@@ -335,6 +336,27 @@ static void console_cal_show(void)
                  off_frac,
                  (unsigned long)(scale1000 / 1000U),
                  (unsigned long)(scale1000 % 1000U));
+
+  app_param_info_t info;
+  app_param_info(&info);
+  app_log_printf("CAL stored=%lu/%lu slot=%lu erases=%lu err=%d\r\n",
+                 (unsigned long)info.stored,
+                 (unsigned long)info.slot_count,
+                 (unsigned long)info.next_slot,
+                 (unsigned long)info.erases,
+                 info.flash_error);
+}
+
+static void console_cal_persist(float offset, float scale)
+{
+  if (app_param_save(offset, scale) != 0)
+  {
+    app_log_printf("CAL save failed; value kept in RAM only\r\n");
+  }
+  /* A flash erase blocks instruction fetch for ~2 ms, which is not a control
+     health problem, so restart the jitter/overrun statistics window. */
+  app_control_clear_stats();
+  app_log_printf("CTRL stats reset after flash op\r\n");
 }
 
 static void console_cal(const char *arg)
@@ -351,6 +373,18 @@ static void console_cal(const char *arg)
   else if (strncmp(arg, "reset", 5) == 0)
   {
     app_control_reset_calibration();
+    console_cal_persist(0.0f, 1.0f);
+    console_cal_show();
+  }
+  else if (strncmp(arg, "erase", 5) == 0)
+  {
+    if (app_param_erase() == 0)
+    {
+      app_log_printf("CAL page erased\r\n");
+    }
+    app_control_reset_calibration();
+    app_control_clear_stats();
+    app_log_printf("CTRL stats reset after flash op\r\n");
     console_cal_show();
   }
   else if (strncmp(arg, "set", 3) == 0)
@@ -369,6 +403,7 @@ static void console_cal(const char *arg)
       return;
     }
     app_control_set_calibration(offset, scale);
+    console_cal_persist(offset, scale);
     console_cal_show();
   }
   else
@@ -472,13 +507,13 @@ static void console_dispatch(char *line)
     tx_thread_sleep(20);
     *(volatile uint32_t *)0xFFFFFFF0UL = 0xDEADBEEFUL;
   }
+#endif
   else if (strcmp(line, "reboot") == 0)
   {
     app_log_printf("REBOOT requested\r\n");
     tx_thread_sleep(20);
     NVIC_SystemReset();
   }
-#endif
   else
   {
     app_log_printf("ERR unknown-cmd=%s len=%lu\r\n",

@@ -52,8 +52,20 @@ _sstack = _estack - _Min_Stack_Size;
 MEMORY
 {
   RAM    (xrw)    : ORIGIN = 0x20000000,   LENGTH = 640K
-  FLASH    (rx)    : ORIGIN = 0x8000000,   LENGTH = 2048K
+  /* Last 16 KB of bank 1 are reserved for the parameter page. Reserving 16 KB
+     covers both geometries (8 KB sectors with dual bank, 16 KB without). */
+  FLASH    (rx)    : ORIGIN = 0x8000000,   LENGTH = 2032K
+  PARAM    (r)     : ORIGIN = 0x080FC000,  LENGTH = 16K
 }
+
+/* Parameter record log, used by app_param.c. It sits inside the reserved
+   PARAM range and fills one 8 KB sector. */
+_param_page_start = 0x080FE000;
+_param_page_end = 0x08100000;
+
+ASSERT((_param_page_start >= ORIGIN(PARAM)) &&
+       (_param_page_end <= ORIGIN(PARAM) + LENGTH(PARAM)),
+       "parameter page outside PARAM region")
 
 /* Sections */
 SECTIONS

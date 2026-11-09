@@ -26,19 +26,20 @@ echo "PASS symbols"
 make flash OPT="$OPT" APP_PROFILE="$APP_PROFILE"
 
 case "$MODE" in
-  basic|control|mpu|wwdg|watchdog|fault)
+  basic|control|mpu|param|wwdg|watchdog|fault)
     python3 scripts/serial_check.py --port "$PORT" --mode "$MODE"
     ;;
   all)
     python3 scripts/serial_check.py --port "$PORT" --mode basic
     python3 scripts/serial_check.py --port "$PORT" --mode control
     python3 scripts/serial_check.py --port "$PORT" --mode mpu
+    python3 scripts/serial_check.py --port "$PORT" --mode param
     python3 scripts/serial_check.py --port "$PORT" --mode wwdg
     python3 scripts/serial_check.py --port "$PORT" --mode watchdog
     python3 scripts/serial_check.py --port "$PORT" --mode fault
     ;;
   *)
-    echo "usage: $0 [basic|control|mpu|wwdg|watchdog|fault|all]" >&2
+    echo "usage: $0 [basic|control|mpu|param|wwdg|watchdog|fault|all]" >&2
     exit 2
     ;;
 esac

@@ -32,7 +32,9 @@ else
 OPT ?= -O0
 endif
 PLANT_ADC ?= 0
-CFLAGS = -mcpu=$(MCU) $(FPU) -mthumb -Wall -Wextra -g $(OPT) -std=c99
+# -mcmse: this image runs in the Secure state with TZEN enabled, so the HAL
+# must use the secure flash registers (SECCR/SECKEYR) instead of the NS ones.
+CFLAGS = -mcpu=$(MCU) $(FPU) -mthumb -mcmse -Wall -Wextra -g $(OPT) -std=c99
 ifeq ($(APP_PROFILE),release)
 CFLAGS += -DAPP_RELEASE=1
 else
@@ -100,6 +102,7 @@ APP_SRCS = \
 	Core/Src/app_console.c \
 	Core/Src/app_control.c \
 	Core/Src/app_mpu.c \
+	Core/Src/app_param.c \
 	Core/Src/app_fault.c \
 	Core/Src/app_watchdog.c \
 	Core/Src/app_stacks.c \

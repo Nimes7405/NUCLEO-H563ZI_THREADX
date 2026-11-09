@@ -3,6 +3,7 @@
 #include "app_control.h"
 #include "app_log.h"
 #include "app_mpu.h"
+#include "app_param.h"
 #include "app_stacks.h"
 #include "app_watchdog.h"
 
@@ -49,6 +50,7 @@ void tx_application_define(VOID *first_unused_memory)
   app_stacks_bind_guard(APP_STK_PROD_B, prod_b_block.guard, sizeof(prod_b_block.guard));
 
   app_mpu_init();
+  app_param_report();
 
   if (tx_thread_create(&monitor_thread, "monitor", monitor_entry, 0U,
                        monitor_block.stack, sizeof(monitor_block.stack),

@@ -2,6 +2,7 @@
 #include "app_config.h"
 #include "app_fault.h"
 #include "app_log.h"
+#include "app_param.h"
 #include "app_watchdog.h"
 
 #ifndef APP_PLANT_ADC_DEFAULT
@@ -150,6 +151,15 @@ void app_control_init(void)
   ctrl_div = 0U;
   ctrl_isr_count = 0U;
   ctrl_overruns = 0U;
+
+  /* Restore calibration before the ISR starts, so the first control step
+     already uses the stored values. */
+  float stored_offset = 0.0f;
+  float stored_scale = 1.0f;
+  if (app_param_load(&stored_offset, &stored_scale) != 0)
+  {
+    app_control_set_calibration(stored_offset, stored_scale);
+  }
 }
 
 void app_control_start(void)
@@ -316,6 +326,16 @@ void app_control_report(void)
                  (unsigned long)(kp100 % 100U),
                  (unsigned long)(ki1000 / 1000U),
                  (unsigned long)(ki1000 % 1000U));
+}
+
+void app_control_clear_stats(void)
+{
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  ctrl_jitter_min = 0xFFFFFFFFU;
+  ctrl_jitter_max = 0U;
+  ctrl_overruns = 0U;
+  __set_PRIMASK(primask);
 }
 
 int app_control_set_setpoint(int32_t setpoint)

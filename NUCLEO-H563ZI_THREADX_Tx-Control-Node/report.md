@@ -12,11 +12,11 @@
 
 - 目录 `NUCLEO-H563ZI_THREADX_Tx-Control-Node` 从可靠性层复制，`TARGET`、
   `.vscode/launch.json`、启动横幅与 `READY` 已同步。
-- P4 dev `-O0`：`text 119,320 / data 2,312 / bss 21,696`，`.bin` 121,636 B。
-- P4 dev `-O2`：`text 91,012 / data 2,312 / bss 21,672`，`.bin` 93,332 B。
-- P4 release `-O2`：`text 89,828 / data 2,312 / bss 21,672`，`.bin` 92,148 B。
-- P4 相对 P3：dev `-O0` text +1,224 B；dev `-O2` +1,000 B；
-  release `-O2` 比 P3 的 dev O2 小 184 B（裁掉破坏性命令的收益）。
+- P4 dev `-O0`：`text 124,272 / data 2,344 / bss 21,720`，`.bin` 126,620 B。
+- P4 dev `-O2`：`text 97,020 / data 2,344 / bss 21,696`，`.bin` 99,364 B。
+- P4 release `-O2`：`text 95,844 / data 2,344 / bss 21,696`，`.bin` 98,188 B。
+- Flash 参数页（`app_param.c` + HAL flash 驱动）约占 `-O0` text 6.2 KB；
+  release 比 dev O2 小 1.2 KB（裁掉破坏性命令的收益）。
 - TIM1 更新中断 20 kHz，控制环 10 kHz；`cnt` 每 500 ms 增加 10,000。
 - 20 kHz 周期抖动 min/max 约 `49.94/50.06`、`48.42/51.54`、`49.96/50.06` µs，
   spread 0.1–3.2 µs，`ovr=0`。
@@ -26,14 +26,17 @@
 - `guard` → `CFSR=0x00000082`、`MMFAR=<guard>`、`FAULT guard=prod_a`；
   连续 3 次故障进入 safe mode，`fault clear` + `ctrl on` 恢复。
 - `PLANT_ADC=1` 烧写后 `CTRL mode=adc`，ADC 原始值随输入变化。
-- `./scripts/selfcheck.sh all` 六组全部 PASS。
+- `./scripts/selfcheck.sh all` 七组全部 PASS（basic/control/mpu/param/wwdg/watchdog/fault）。
 - 1 h O0 soak PASS（3603 s）：`boots/faults/resets=0`、`safe/drop=0`、
   `ovr=0`、worst jitter spread 3.49 µs；`uptime` 增量 3,600,500 ms，
   `wdg_feed` 568→7,769，控制 `cnt` 增量 72,010,000。
 - P4：`cal` 参数校准、`APP_PROFILE=release`（O2、裁掉破坏性命令）、
-  `OPT=-O2 selfcheck all` 六组 PASS、`release_check.sh` PASS。
+  `OPT=-O2 selfcheck all` 七组 PASS、`release_check.sh` PASS。
 - O2 dev 15 min soak PASS：`boots/faults/resets=0`、`ovr=0`、
   worst jitter spread 1.63 µs；`uptime +900,090 ms`。
+- P4 追加：`cal` 校准值掉电保存在片内 Flash 参数页（`0x080FE000`），
+  重启/重新烧写后自动恢复；`cal 500 1.0` → `fb=adc-500`、`cal 0 0.5` → `fb=adc/2`
+  实测吻合；`selfcheck all` 扩为七组（新增 `param`）。
 - P2 阶段 `-O0` 固件连续运行约 15 min（控制 ISR `cnt=18,179,997` @20 kHz）无复位；P3-lite 已扩展到 1 h soak。
 
 ## 实现内容
@@ -214,16 +217,62 @@ SOAK PASS seconds=3603.2 status=840 boots=0 faults=0 resets=0 safe=0 drops=0
 
 ### 验证
 
-- `OPT=-O2 ./scripts/selfcheck.sh all`：六组 PASS，control 抖动
-  `49.93/50.06 µs`、`ovr=0`，`cal` 三项 PASS。
-- `./scripts/release_check.sh`：release 构建 89,828 B text / 92,148 B bin；
+- `OPT=-O2 ./scripts/selfcheck.sh all`：七组 PASS（含 `param`），control 抖动
+  `49.86/50.16 µs`、`ovr=0`，`cal` 三项 PASS。
+- `./scripts/release_check.sh`：release 构建 95,844 B text / 98,188 B bin；
   `profile=release`，`HELP` 无 `guard/stall/crash/reboot`，
   control 与 60 s soak 均 PASS（release 60 s worst jitter spread 2.13 µs）。
+- P4 最终 dev 固件 15 min soak：`SOAK PASS seconds=903.2 status=270
+  boots=0 faults=0 resets=0 safe=0 drops=0`；`uptime_ms=907,920`、
+  `wdg_feed=1,815`、`ctrl cnt=18,151,411`、`ovr=0`、worst jitter spread 3.63 µs。
 - `-O2` dev 15 min soak：`SOAK PASS seconds=903.2 status=271
   boots=0 faults=0 resets=0 safe=0 drops=0`；基线 `uptime=369,990 ms`、
   `wdg_feed=740`、`cnt=7,391,539`，增量分别 900,090 ms、1,800、18,010,000；
   `ctrl cnt=25,401,539`、`ovr=0`、`err=0`、`fb=3000`、worst jitter 1.63 µs；
   栈最高 monitor 1112/2048（54.3%）、console 1200/3072（39.1%）。
+
+### 校准值存储（片内 Flash 参数页）
+
+- 位置：`0x080FE000`（bank 1 sector 127），链接脚本把最后 16 KB 划为
+  `PARAM` 段，`FLASH` 长度从 2048K 收到 2032K，防止代码落进参数区。
+- 格式：16 B 记录 `magic("CAL0") + offset + scale + CRC32`，正好是 H5 的
+  quad-word 编程粒度。
+- 策略：**追加式日志**。每次保存找一个空槽写一条，512 槽写满才擦一次扇区；
+  掉电导致的半写记录 CRC 校验失败被跳过，上一条仍然有效。
+- 启动：`app_control_init()` 里先 `app_param_load()`，读到有效记录立刻套用，
+  保证控制 ISR 第一次执行就用正确校准。
+- 观测：`PARAM addr=0x080fe000 used=n/512 slot=m erases=e bank=b err=0`。
+
+实测：
+
+```text
+PARAM saved offset=250.00 scale=1.500 slot=0 pause_ms=0
+CAL offset=250.00 scale=1.500
+CAL stored=1/512 slot=1 erases=0 err=0
+# 重启后
+BOOT reset=software fault=none safe=0 profile=dev
+PARAM addr=0x080fe000 used=1/512 slot=1 erases=0 bank=0 err=0
+CAL offset=250.00 scale=1.500
+```
+
+### 参数存储踩的四个坑
+
+1. **H5 最后 8 KB 是 EDATA 区**。最初的实现放在 `0x081FE000`：擦除返回 OK
+   但内容不变、编程失败、OpenOCD 读出来是 `0x00000000`。EDATA 需要 EDATA
+   专用的半字/字命令，不是普通 quad-word。改到 `0x080FE000`（bank 1 最后
+   一个普通扇区）后一切正常。
+2. **TZEN 打开时 HAL 会走错寄存器组**。没有 `-mcmse` 时
+   `__ARM_FEATURE_CMSE` 未定义，`IS_FLASH_SECURE_OPERATION()` 恒为假，
+   HAL 写 `NSCR/NSKEYR` 去操作安全 Flash，擦除返回 `PGSERR`(0x40000)。
+   解决办法是给整个工程加 `-mcmse`（单镜像 Secure 的正确编译方式）。
+3. **P3 的只读 Flash MPU region 会拦住编程**。HAL 的
+   `FLASH_Program_QuadWord()` 是四条 `*dest_addr = *src_addr`，属于普通
+   CPU store，被 `CFSR=0x82 / MMARVALID+DACCVIOL` 打回 MemManage。
+   现在在**关中断窗口内**临时关 MPU，编程完立刻恢复。
+4. **擦除会阻塞取指**。8 KB 扇区擦除实测让 20 kHz ISR 停顿 **≈2.0 ms**
+   （`jit_max=2042.69`、`ovr=+4`）。因为擦除只在 512 次保存后发生一次，
+   且是人为操作，处理方式是擦后清空抖动/`ovr` 统计并打印
+   `CTRL stats reset after flash op`，同时把 `pause_ms` 打出来留证。
 
 ## 问题定位与修复
 
@@ -306,3 +355,10 @@ SOAK PASS seconds=3603.2 status=840 boots=0 faults=0 resets=0 safe=0 drops=0
     并用 `release_check.sh` 断言命令确实不存在。
 13. 校准参数要有默认值（offset=0/scale=1），并在切换时重置滤波器/积分，
     否则默认路径也会被校准代码改变行为。
+14. **H5 的 Flash 末尾 8 KB 是 EDATA**，不是普通用户区；参数页要往前挪一个扇区。
+15. **Secure 单镜像必须 `-mcmse`**，否则 HAL 的 flash 驱动用 NS 寄存器，
+    表现为 `PGSERR` 而不是权限错误。
+16. **MPU 只读区会拦 flash 编程**（HAL 用 CPU store 写数据），要在编程那一刻
+    关 MPU，并且已经处在关中断窗口内。
+17. **参数写 Flash ≠ 免费**：扇区擦除约 2 ms 取指停顿，控制环会丢几个周期，
+    要显式记录停顿并把抖动统计窗口重置，否则健康指标被一次性操作污染。

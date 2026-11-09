@@ -67,6 +67,26 @@ void app_mpu_init(void)
                  (unsigned long)guard_count);
 }
 
+/*
+ * The flash HAL programs a quad-word with plain CPU stores, which the
+ * read-only flash region would reject with a MemManage fault. The caller keeps
+ * interrupts masked around the operation, so the MPU is switched off only for
+ * this short, single-threaded window and restored immediately afterwards.
+ */
+void app_mpu_param_write(int enable)
+{
+  if (enable != 0)
+  {
+    ARM_MPU_Disable();
+  }
+  else
+  {
+    ARM_MPU_Enable(MPU_CTRL_PRIVDEFENA_Msk);
+  }
+  __DSB();
+  __ISB();
+}
+
 uint32_t app_mpu_region_count(void)
 {
   return region_count;

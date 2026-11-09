@@ -243,6 +243,44 @@ def mode_wwdg(port):
     return ok
 
 
+def mode_param(port):
+    port.drain_quiet()
+    port.send("fault clear")
+    port.read_for(0.15)
+
+    port.clear()
+    port.send("cal set 250 1.5")
+    saved = port.wait_for("PARAM saved offset=250.00 scale=1.500", 3.0)
+    ok = check(port, "param-save", saved, "PARAM saved offset=250.00 scale=1.500")
+    ok &= check(port, "cal-applied", port.wait_for("CAL offset=250.00 scale=1.500", 2.0),
+                "CAL offset=250.00 scale=1.500")
+
+    port.clear()
+    port.send("reboot")
+    ok &= check(port, "reboot-banner", port.wait_for("BOOT reset=", 10.0), "BOOT reset=")
+    ok &= check(port, "param-boot-line", port.wait_for("PARAM addr=0x", 5.0), "PARAM addr=0x")
+    ok &= check(port, "ready", port.wait_for("READY", 5.0), "READY")
+    port.clear()
+    port.send("cal show")
+    ok &= check(port, "cal-restored",
+                port.wait_for("CAL offset=250.00 scale=1.500", 3.0),
+                "CAL offset=250.00 scale=1.500")
+
+    port.clear()
+    port.send("cal reset")
+    ok &= check(port, "cal-reset-saved", port.wait_for("PARAM saved offset=0.00 scale=1.000", 3.0),
+                "PARAM saved offset=0.00 scale=1.000")
+    port.clear()
+    port.send("reboot")
+    port.wait_for("READY", 10.0)
+    port.clear()
+    port.send("cal show")
+    ok &= check(port, "default-restored",
+                port.wait_for("CAL offset=0.00 scale=1.000", 3.0),
+                "CAL offset=0.00 scale=1.000")
+    return ok
+
+
 def mode_release(port):
     port.read_for(0.5)
     boot_text = port.text()
@@ -271,7 +309,7 @@ def mode_release(port):
     ok &= check(port, "no-guard", "guard" not in help_line, "guard absent from HELP")
     ok &= check(port, "no-stall", "stall" not in help_line, "stall absent from HELP")
     ok &= check(port, "no-crash", "crash" not in help_line, "crash absent from HELP")
-    ok &= check(port, "no-reboot", "reboot" not in help_line, "reboot absent from HELP")
+    ok &= check(port, "reboot-kept", "reboot" in help_line, "reboot present in HELP")
     return ok
 
 
@@ -279,7 +317,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", default="/dev/ttyACM0")
     parser.add_argument("--baud", type=int, default=115200)
-    parser.add_argument("--mode", choices=["basic", "control", "mpu", "wwdg", "watchdog", "fault", "release"], default="basic")
+    parser.add_argument("--mode", choices=["basic", "control", "mpu", "param", "wwdg", "watchdog", "fault", "release"], default="basic")
     args = parser.parse_args()
 
     port = Port(args.port, args.baud)
@@ -292,6 +330,8 @@ def main():
             ok = mode_control(port)
         elif args.mode == "mpu":
             ok = mode_mpu(port)
+        elif args.mode == "param":
+            ok = mode_param(port)
         elif args.mode == "wwdg":
             ok = mode_wwdg(port)
         elif args.mode == "watchdog":

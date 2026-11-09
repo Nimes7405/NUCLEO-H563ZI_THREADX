@@ -62,7 +62,7 @@
 | 项目 | 覆盖 | 状态 |
 | --- | --- | --- |
 | [`Tx-Reliability-Monitor`](./NUCLEO-H563ZI_THREADX_Tx-Reliability-Monitor/README.md) | 方向 G（P1）+ 缺口 #1–#4、#10、#12 | 板上验证：`selfcheck` basic/watchdog/fault 全通过；205 s 稳定运行；故障记录与 IWDG 复位均实测 |
-| [`Tx-Control-Node`](./NUCLEO-H563ZI_THREADX_Tx-Control-Node/README.md) | 路线 1 P2（方向 A）+ P3-lite（方向 F）+ P4 release/校准 + 方向 G | 板上验证：TIM1 20 kHz / 控制 10 kHz、抖动 spread 0.1–3.2 µs；P3-lite 静态 MPU、guard 归因、安全模式、分级 WWDG；P4 `cal` 参数校准、`APP_PROFILE=release` 裁掉破坏性命令；`selfcheck` 六组全通过；1 h O0 soak PASS；O2 `selfcheck all`、O2 15 min soak、`release_check.sh` PASS |
+| [`Tx-Control-Node`](./NUCLEO-H563ZI_THREADX_Tx-Control-Node/README.md) | 路线 1 P2（方向 A）+ P3-lite（方向 F）+ P4 release/校准 + 方向 G | 板上验证：TIM1 20 kHz / 控制 10 kHz、抖动 spread 0.1–3.2 µs；P3-lite 静态 MPU、guard 归因、安全模式、分级 WWDG；P4 `cal` 参数校准 + **片内 Flash 参数页掉电保存**、`APP_PROFILE=release` 裁掉破坏性命令；`selfcheck` 七组全通过；1 h O0 soak PASS；O2 `selfcheck all`、O2 15 min soak、`release_check.sh` PASS |
 
 > 后续路线可以直接从这两个项目派生：可靠性层（日志、心跳、看门狗、故障记录、
 > 状态台、自检）和控制环骨架（PWM/ADC/DWT/PI）都已经就绪。
@@ -181,11 +181,12 @@ P0 基线（已完成）
   → P4 量产化（-O2、参数校准、烧写与自检）
 ```
 
-当前进度：P0、P1、P2、P3-lite 已完成，1 h O0 soak PASS；P4 已完成
-`-O2` 六组自检、`cal` 参数校准和 `release` profile 裁剪（见
+当前进度：P0、P1、P2、P3-lite、P4 均已完成（见
 [`Tx-Control-Node`](./NUCLEO-H563ZI_THREADX_Tx-Control-Node/README.md)）。
-20 kHz ISR 周期抖动 spread 0.1–3.2 µs、`ovr=0`；静态 MPU + 栈 guard + 安全模式
-+ 分级 WWDG 已上板验证。O2 15 min soak 已 PASS。剩余：`cal` 的 Flash 掉电保持，以及长跑逐步加长到 8/24 h。
+P4 = `-O2` 七组自检 + `cal` 参数校准（**片内 Flash 掉电保存**，无需外部 Flash/SD）
++ `release` profile 裁剪 + `release_check.sh`。20 kHz ISR 周期抖动 spread
+0.1–3.2 µs、`ovr=0`；静态 MPU + 栈 guard + 安全模式 + 分级 WWDG 均上板验证。
+剩余：长跑从 1 h 逐步加长到 8/24 h。
 
 验收标准（先测基线，再定死目标值）：
 - 目标控制环 10 kHz（100 µs）周期抖动 p99 < 5 µs（DWT 或 GPIO 翻转 + 示波器实测）
@@ -280,6 +281,7 @@ P0 基线（已完成）
 | MPU / tickless | 本包 ThreadX 不含 MPU 扩展和低功耗模块；P3-lite 用 CMSIS 静态 MPU + 栈 guard，动态 per-thread 隔离和 tickless 仍需自建 |
 | tick 粒度 | 100 Hz = 10 ms；控制环/高频采集不能依赖 tick |
 | `-O0` 构建 | 开发默认 `-O0`；`make release` 使用 `-O2` + `APP_RELEASE=1`，P4 已复测 |
+| Flash 参数区 | 最后 16 KB 划给 `PARAM`（`0x080FC000–0x080FFFFF`），参数记录页在 `0x080FE000`；注意 `0x081FE000` 起 8 KB 是 EDATA，不能当用户区用 |
 | 单镜像模板 | 不含 NS 启动链；`THREADX_MODE=NON_SECURE` 不能替代 TrustZone 配置 |
 | 板载无外部存储 | FileX/LevelX 必须外接介质 |
 | FDCAN 无收发器 | 走 CAN 需外部硬件 |
@@ -294,10 +296,10 @@ P0 基线（已完成）
 
 1. **已完成**：P1 可观测性（方向 G）—— 见 [`Tx-Reliability-Monitor`](./NUCLEO-H563ZI_THREADX_Tx-Reliability-Monitor/README.md)。
 2. **已完成**：路线 1 的 P2 控制环 —— 见 [`Tx-Control-Node`](./NUCLEO-H563ZI_THREADX_Tx-Control-Node/README.md)。TIM1 20 kHz、控制 10 kHz、抖动 spread 0.1–3.2 µs、`stall 3` 触发 IWDG。
-3. **已完成**：路线 1 的 P3-lite 容错 —— 静态 MPU（12 regions / 5 guards）、guard→MemManage 归因、连续 3 次故障安全模式、`stall 4` 触发 WWDG；`selfcheck` 六组全通过。
-4. **已完成（P4 主体）**：`-O2` 六组自检、`cal` 参数校准、`release` profile + `release_check.sh`；剩余 O2 1 h soak 收尾和 `cal` Flash 掉电保持。
+3. **已完成**：路线 1 的 P3-lite 容错 —— 静态 MPU（12 regions / 5 guards）、guard→MemManage 归因、连续 3 次故障安全模式、`stall 4` 触发 WWDG。
+4. **已完成**：P4 量产化主体 —— `-O2` 七组自检、`cal` 参数校准与片内 Flash 掉电保存、`release` profile + `release_check.sh`。
 5. **下一步（路线 1）**：把长跑逐步加长到 8/24 h；路线 2 仍可按 P2 做 ADC/DMA + FileX 介质驱动。
-6. **一个季度内**：完成路线 P4 收尾，在 1 h soak 基础上逐步加长到 8/24 h，再做掉电/故障注入，形成验收报告。
+6. **一个季度内**：在 1 h soak 基础上逐步加长到 8/24 h，再做掉电/故障注入，形成验收报告。
 7. **贯穿始终**：每加一个外设或中断，先过 §5.1 检查清单（模式宏、端口完整性、时基分工、NVIC、栈大小），再谈功能。
 
 ---
