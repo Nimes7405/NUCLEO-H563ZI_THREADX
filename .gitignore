@@ -1,0 +1,18 @@
+# Build outputs
+build/
+*.o
+*.d
+*.elf
+*.bin
+*.hex
+*.map
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Logs and temporary files
+*.log
+*.csv
+.DS_Store
