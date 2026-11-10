@@ -226,6 +226,10 @@ P0 基线（已完成）
 - **tick 100 Hz 只有 10 ms 粒度**：周期任务不要用 `tx_thread_sleep(1)` 当 10 ms 定时（会有相位抖动），用 ThreadX 定时器或硬件触发。
 - **32-bit tick 在 100 Hz 下约 497 天回绕**；长期运行用 `ULONG` 差值比较，不要直接比大小。
 - `tx_user.h` 目前只有两个宏。需要栈检测/事件 trace 时在这里补 `TX_ENABLE_STACK_CHECKING`、`TX_ENABLE_EVENT_TRACE`。
+- **要写内部 Flash（参数/校准）时先过三条**：① 编译加 `-mcmse`（否则 HAL 走
+  `NSCR`，TZEN 下报 `PGSERR`）；② 别用 `0x081FE000` 起的 8 KB EDATA 区；
+  ③ 若开了"Flash 只读"MPU 分区，编程那一刻要临时关 MPU。详见
+  [模板 TIPS §7](./NUCLEO-H563ZI_THREADX-SECURE_TEMPLATE/NUCLEO-H563ZI_THREADX_TIPS.md)。
 
 ### 5.2 内存与性能预算（上线前必做）
 
@@ -239,6 +243,11 @@ P0 基线（已完成）
 - 日志默认走 ST-LINK 虚拟串口：**USART3，PD8/PD9，AF7**（Thread-Sync 已验证）。
 - USB 数据口是板载 USB-C（`USB_DRD_FS`）；ST-LINK 的 USB 只用于调试，不传应用数据。
 - 板载**没有** SD 卡座和外部 Flash：方向 B 必须外接（SD 卡座或 SPI NOR）。
+  但**参数/校准/配置这类小数据不必外接**——片内 2 MB Flash 尾部留一个扇区就够
+  （Control-Node 已实现，见 §6 资产表）。
+- 片内 Flash 扇区 **8 KB**、2 MB 双 bank（`FLASH_SECTOR_NB=128`/bank）；
+  **最后 8 KB（`0x081FE000`）是 EDATA 高擦写区**，只认 EDATA 专用命令，
+  不能当普通用户 Flash 用。
 - FDCAN1/2 外设存在，但板上没有收发器；方向 E 走 CAN 需外接收发器（如 SN65HVD230）。
 - ADC1/2 为 12-bit；DAC1 有两个通道；注意输入阻抗、基准与地。
 - **H563 没有 AES/SAES**（`stm32h563xx.h` 无 `AES_BASE`/`SAES_BASE`），只有 HASH/PKA/RNG；加密/验签按"控制/遥测报文"量级设计，高吞吐加密直接选 H573。
@@ -264,6 +273,8 @@ P0 基线（已完成）
 | 双镜像 + CMSE 导入库 + 安全栈 | [SecureLED-TrustZone](../NUCLEO-H563ZI_THREADX-SECURE_Tx-SecureLED-TrustZone/report.md) | OTA/安全服务/NS 应用 |
 | 可靠性层（IWDG/心跳/故障记录/日志/状态台/自检） | [Tx-Reliability-Monitor](./NUCLEO-H563ZI_THREADX_Tx-Reliability-Monitor/README.md) | 所有派生项目的 P1 基线，可直接复制 |
 | 控制环 + P3-lite 容错（TIM1 PWM + ADC 注入 + 前馈/PI + DWT 抖动 + 静态 MPU + 栈 guard + 安全模式 + 分级 WWDG） | [Tx-Control-Node](./NUCLEO-H563ZI_THREADX_Tx-Control-Node/README.md) | 路线 1 的 P2/P3-lite 基线，可直接替换被控对象 |
+| 片内 Flash 参数页（16 B 记录 + CRC32 + 追加日志 + 扇区轮擦） | [Tx-Control-Node `Core/Src/app_param.c`](./NUCLEO-H563ZI_THREADX_Tx-Control-Node/Core/Src/app_param.c) | **任何需要掉电保存小数据**的项目：校准值、阈值、设备 ID、标定表；路线 2 的配置存储可直接复用 |
+| release 构建档位 + 命令裁剪（`APP_PROFILE` + `release_check.sh`） | [Tx-Control-Node](./NUCLEO-H563ZI_THREADX_Tx-Control-Node/README.md) | 量产固件裁掉 `guard/stall/crash`，并断言命令确实不存在 |
 | USB 设备栈 + USB-PD 附着 | [USBX HID](../NUCLEO-H563ZI_USBX_Ux-Device-Human-Interface/report.md) | 方向 C 的直接起点 |
 | 故障排障方法（INVPC → CFSR/EXC_RETURN） | [USBX HID 报告](../NUCLEO-H563ZI_USBX_Ux-Device-Human-Interface/report.md) | 下次 10 分钟定位同类问题 |
 | 网络/OTA/自检/长跑工具 | [NetXDuo workspace](../NUCLEO-H563ZI_NetXDuo/README.md) | 跨线复用，避免重复实现 |
@@ -281,9 +292,10 @@ P0 基线（已完成）
 | MPU / tickless | 本包 ThreadX 不含 MPU 扩展和低功耗模块；P3-lite 用 CMSIS 静态 MPU + 栈 guard，动态 per-thread 隔离和 tickless 仍需自建 |
 | tick 粒度 | 100 Hz = 10 ms；控制环/高频采集不能依赖 tick |
 | `-O0` 构建 | 开发默认 `-O0`；`make release` 使用 `-O2` + `APP_RELEASE=1`，P4 已复测 |
-| Flash 参数区 | 最后 16 KB 划给 `PARAM`（`0x080FC000–0x080FFFFF`），参数记录页在 `0x080FE000`；注意 `0x081FE000` 起 8 KB 是 EDATA，不能当用户区用 |
+| Flash 参数区 | Control-Node 把 bank 1 最后 16 KB 划给 `PARAM`（`0x080FC000–0x080FFFFF`），记录页在 `0x080FE000`；`0x081FE000` 起 8 KB 是 EDATA，不能当用户区用。**模板 Makefile 尚未加 `-mcmse`**，派生项目要写 Flash 时必须自己补 |
+| 参数页擦除停顿 | 8 KB 扇区擦除实测让 20 kHz 控制中断停顿约 2 ms；控制环不能容忍时需双页轮换 + 擦前 `ctrl off` |
 | 单镜像模板 | 不含 NS 启动链；`THREADX_MODE=NON_SECURE` 不能替代 TrustZone 配置 |
-| 板载无外部存储 | FileX/LevelX 必须外接介质 |
+| 板载无外部存储 | FileX/LevelX 必须外接介质；但**参数/配置小数据可用片内 Flash 参数页**（P4 已实现） |
 | FDCAN 无收发器 | 走 CAN 需外部硬件 |
 | 无 GUIX | 本 Cube 包不含，图形界面需另行引入 |
 | 故障处理是死循环 | `HardFault_Handler` / `Error_Handler` 都不会复位，现场表现为"死机" |

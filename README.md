@@ -28,6 +28,12 @@
   SysTick 与 TIM6 的分工、NVIC 配置、线程栈大小。
 - 验证优先用各项目的 `scripts/selfcheck.sh`，避免手工步骤漂移；长跑用
   Control-Node 的 `scripts/soak.py`，先 1 h 再逐步加长，不要一上来跑 72 h。
+- **掉电保存的小数据（校准值、阈值、设备 ID）优先用片内 Flash 参数页**，
+  不依赖外部介质：复用 [`Tx-Control-Node/Core/Src/app_param.c`](./NUCLEO-H563ZI_THREADX_Tx-Control-Node/Core/Src/app_param.c)
+  （16 B 记录 + CRC32 + 追加日志）。注意三点：Makefile 需 `-mcmse`、
+  避开 `0x081FE000` 的 EDATA 区、编程时临时关 MPU 只读分区。
+- 新项目派生后先读
+  [模板 TIPS §7「写内部 Flash」](./NUCLEO-H563ZI_THREADX-SECURE_TEMPLATE/NUCLEO-H563ZI_THREADX_TIPS.md)。
 - 文档入口：[Application_note.md](./Application_note.md)（方向与路线）、
   [NUCLEO-H563ZI_THREADX_TIPS.md](./NUCLEO-H563ZI_THREADX-SECURE_TEMPLATE/NUCLEO-H563ZI_THREADX_TIPS.md)（模板配置）、
   [New_project_naming.md](./NUCLEO-H563ZI_THREADX-SECURE_TEMPLATE/New_project_naming.md)（新建项目流程）。

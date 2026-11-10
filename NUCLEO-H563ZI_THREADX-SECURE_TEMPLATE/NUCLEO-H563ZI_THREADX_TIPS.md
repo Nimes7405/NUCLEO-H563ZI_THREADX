@@ -27,6 +27,10 @@
 - `THREADX_MODE=NON_SECURE` 仅切换 ThreadX 编译模式；它不会生成 Secure
   启动程序、SAU/IDAU 配置、Non-Secure 向量表或存储器/外设安全属性。
   只有工程另行实现并验证完整 Secure-to-Non-Secure 启动链后，才可使用。
+- **`TX_SINGLE_MODE_SECURE` 与 `-mcmse` 是两件事**：前者决定 ThreadX 端口
+  如何编译，后者决定 `__ARM_FEATURE_CMSE` 是否定义。本模板 Makefile
+  **当前不含 `-mcmse`**，所以 HAL 只要判断"是否安全操作"就一律走非安全分支。
+  纯计算/驱动代码不受影响，但**写内部 Flash 时必然失败**（见第 7 节）。
 
 ## 2. ThreadX 端口与启动源必须完整且版本匹配
 
@@ -143,6 +147,44 @@ make -j4
 | TIM6 MSP 与 IRQ | `Core/Src/stm32h5xx_hal_msp.c`、`Core/Src/stm32h5xx_it.c` |
 | 主时钟、GPIO 初始化及内核入口 | `Core/Src/main.c` |
 | Flash/RAM 布局 | `STM32H563ZITX_FLASH.ld` |
+
+## 7. 写内部 Flash（参数 / 配置存储）
+
+板载没有外部 Flash 和 SD 卡座，参数和校准值放**片内 Flash**是最省事的方案。
+但 Secure 单镜像下有三个必踩的坑，模板本身没有为它们做任何默认配置：
+
+1. **必须加 `-mcmse`**。不加时 `__ARM_FEATURE_CMSE` 未定义，
+   HAL 的 `IS_FLASH_SECURE_OPERATION()` 恒为假，`HAL_FLASH_Unlock()` 只解锁
+   `NSKEYR`、擦写都操作 `NSCR`，而 TZEN 打开后 Flash 默认全属安全区，
+   结果是 `FLASH_SR.PGSERR`（`HAL_FLASH_GetError()` 返回 `0x00040000`），
+   看起来像"擦除成功但内容不变"。修法是在 `CFLAGS` 里加 `-mcmse`：
+
+   ```make
+   CFLAGS = -mcpu=$(MCU) $(FPU) -mthumb -mcmse -Wall -Wextra -g $(OPT) -std=c99
+   ```
+
+2. **最后 8 KB 不是用户 Flash**。`0x081FE000`–`0x081FFFFF` 是 H5 的
+   **EDATA**（高擦写次数）区，只认 EDATA 专用命令。用普通
+   `FLASH_TYPEPROGRAM_QUADWORD` 会编程失败、擦除报告成功但内容不变、
+   调试器读回 `0x00000000`。参数页要往前放一个普通扇区
+   （Control-Node 用 `0x080FE000`，bank 1 sector 127）。
+
+3. **MPU 只读 Flash 会拦编程**。HAL 的 quad-word 编程是 4 次普通 CPU store
+   到目标地址；如果做了"Flash 只读"的静态 MPU 分区，会直接命中
+   `MemManage`（`CFSR=0x82`、`MMFAR` = 目标 Flash 地址）。要在编程那一刻
+   临时 `ARM_MPU_Disable()`／`ARM_MPU_Enable(PRIVDEFENA)`，并且已处在关中断窗口内。
+
+另外两条工程约定：
+
+- **链接脚本要预留参数区**：把 `FLASH` 长度收小、加一个 `PARAM` 段并用
+  `ASSERT` 保证记录页落在预留范围内，避免代码长大后悄悄覆盖参数。
+- **擦除会阻塞取指**：8 KB 扇区擦除在本板（H563ZI）实测让 20 kHz 中断停顿
+  约 2 ms，单条 16 B 编程只有 0.1–0.2 ms。所以要用"追加日志 + 写满才擦"，
+  并把停顿时间打印出来、事后重置抖动统计。
+
+完整实现与实测数据见
+[`Tx-Control-Node`](../NUCLEO-H563ZI_THREADX_Tx-Control-Node/README.md)
+的 `Core/Src/app_param.c` 与其 `report.md` §「参数存储踩的四个坑」。
 
 本指南记录的是模板的通用 ThreadX/TrustZone 约束；项目级原始移植过程和
 USBX 专项经验仍保留在 USBX HID 工程的 `report.md` 与
