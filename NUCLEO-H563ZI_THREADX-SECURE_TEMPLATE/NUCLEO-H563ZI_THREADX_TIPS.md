@@ -28,9 +28,9 @@
   启动程序、SAU/IDAU 配置、Non-Secure 向量表或存储器/外设安全属性。
   只有工程另行实现并验证完整 Secure-to-Non-Secure 启动链后，才可使用。
 - **`TX_SINGLE_MODE_SECURE` 与 `-mcmse` 是两件事**：前者决定 ThreadX 端口
-  如何编译，后者决定 `__ARM_FEATURE_CMSE` 是否定义。本模板 Makefile
-  **当前不含 `-mcmse`**，所以 HAL 只要判断"是否安全操作"就一律走非安全分支。
-  纯计算/驱动代码不受影响，但**写内部 Flash 时必然失败**（见第 7 节）。
+  如何编译，后者决定 `__ARM_FEATURE_CMSE` 是否定义。本模板 Makefile 已启用
+  `-mcmse`，让 HAL 的安全 Flash 服务能走 `SECCR/SECKEYR`；从旧版模板或旧
+  派生工程 Makefile 复制时要确认该编译标志已同步（见第 7 节）。
 
 ## 2. ThreadX 端口与启动源必须完整且版本匹配
 
@@ -151,9 +151,10 @@ make -j4
 ## 7. 写内部 Flash（参数 / 配置存储）
 
 板载没有外部 Flash 和 SD 卡座，参数和校准值放**片内 Flash**是最省事的方案。
-但 Secure 单镜像下有三个必踩的坑，模板本身没有为它们做任何默认配置：
+Secure 单镜像下有三个必踩的坑：
 
-1. **必须加 `-mcmse`**。不加时 `__ARM_FEATURE_CMSE` 未定义，
+1. **必须加 `-mcmse`**。本模板 Makefile 已启用该标志；旧版或复制自
+   P1 Makefile 的工程要确认已补上。不加时 `__ARM_FEATURE_CMSE` 未定义，
    HAL 的 `IS_FLASH_SECURE_OPERATION()` 恒为假，`HAL_FLASH_Unlock()` 只解锁
    `NSKEYR`、擦写都操作 `NSCR`，而 TZEN 打开后 Flash 默认全属安全区，
    结果是 `FLASH_SR.PGSERR`（`HAL_FLASH_GetError()` 返回 `0x00040000`），

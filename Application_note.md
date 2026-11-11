@@ -62,7 +62,7 @@
 | 项目 | 覆盖 | 状态 |
 | --- | --- | --- |
 | [`Tx-Reliability-Monitor`](./NUCLEO-H563ZI_THREADX_Tx-Reliability-Monitor/README.md) | 方向 G（P1）+ 缺口 #1–#4、#10、#12 | 板上验证：`selfcheck` basic/watchdog/fault 全通过；205 s 稳定运行；故障记录与 IWDG 复位均实测 |
-| [`Tx-Control-Node`](./NUCLEO-H563ZI_THREADX_Tx-Control-Node/README.md) | 路线 1 P2（方向 A）+ P3-lite（方向 F）+ P4 release/校准 + 方向 G | 板上验证：TIM1 20 kHz / 控制 10 kHz、抖动 spread 0.1–3.2 µs；P3-lite 静态 MPU、guard 归因、安全模式、分级 WWDG；P4 `cal` 参数校准 + **片内 Flash 参数页掉电保存**、`APP_PROFILE=release` 裁掉破坏性命令；`selfcheck` 七组全通过；1 h O0 soak PASS；O2 `selfcheck all`、O2 15 min soak、`release_check.sh` PASS |
+| [`Tx-Control-Node`](./NUCLEO-H563ZI_THREADX_Tx-Control-Node/README.md) | 路线 1 P2（方向 A）+ P3-lite（方向 F）+ P4 release/校准 + 方向 G | 板上验证：TIM1 20 kHz / 控制 10 kHz、抖动 spread 0.1–3.2 µs；P3-lite 静态 MPU、guard 归因、安全模式、分级 WWDG；P4 `cal` 参数校准 + **片内 Flash 非易失保存**（写入后复位/重刷保持；物理断电注入待测）、`APP_PROFILE=release` 裁掉破坏性命令；`selfcheck` 七组全通过；1 h O0 soak PASS；O2 `selfcheck all`、O2 15 min soak、`release_check.sh` PASS |
 
 > 后续路线可以直接从这两个项目派生：可靠性层（日志、心跳、看门狗、故障记录、
 > 状态台、自检）和控制环骨架（PWM/ADC/DWT/PI）都已经就绪。
@@ -183,7 +183,7 @@ P0 基线（已完成）
 
 当前进度：P0、P1、P2、P3-lite、P4 均已完成（见
 [`Tx-Control-Node`](./NUCLEO-H563ZI_THREADX_Tx-Control-Node/README.md)）。
-P4 = `-O2` 七组自检 + `cal` 参数校准（**片内 Flash 掉电保存**，无需外部 Flash/SD）
+P4 = `-O2` 七组自检 + `cal` 参数校准（**片内 Flash 非易失保存**，无需外部 Flash/SD）
 + `release` profile 裁剪 + `release_check.sh`。20 kHz ISR 周期抖动 spread
 0.1–3.2 µs、`ovr=0`；静态 MPU + 栈 guard + 安全模式 + 分级 WWDG 均上板验证。
 剩余：长跑从 1 h 逐步加长到 8/24 h。
@@ -226,10 +226,14 @@ P0 基线（已完成）
 - **tick 100 Hz 只有 10 ms 粒度**：周期任务不要用 `tx_thread_sleep(1)` 当 10 ms 定时（会有相位抖动），用 ThreadX 定时器或硬件触发。
 - **32-bit tick 在 100 Hz 下约 497 天回绕**；长期运行用 `ULONG` 差值比较，不要直接比大小。
 - `tx_user.h` 目前只有两个宏。需要栈检测/事件 trace 时在这里补 `TX_ENABLE_STACK_CHECKING`、`TX_ENABLE_EVENT_TRACE`。
-- **要写内部 Flash（参数/校准）时先过三条**：① 编译加 `-mcmse`（否则 HAL 走
-  `NSCR`，TZEN 下报 `PGSERR`）；② 别用 `0x081FE000` 起的 8 KB EDATA 区；
+- **要写内部 Flash（参数/校准）时先过三条**：① 确认工程有 `-mcmse`
+  （当前模板已启用；否则 HAL 走 `NSCR`，TZEN 下报 `PGSERR`）；② 别用
+  `0x081FE000` 起的 8 KB EDATA 区；
   ③ 若开了"Flash 只读"MPU 分区，编程那一刻要临时关 MPU。详见
   [模板 TIPS §7](./NUCLEO-H563ZI_THREADX-SECURE_TEMPLATE/NUCLEO-H563ZI_THREADX_TIPS.md)。
+- **Flash 掉电边界**：Control-Node 的追加记录 CRC 能识别半写记录，但物理断电
+  尚未实测；当前单扇区满页擦除也没有双页事务保护，量产前需做断电注入并按要求
+  增加双页轮换。
 
 ### 5.2 内存与性能预算（上线前必做）
 
@@ -292,8 +296,8 @@ P0 基线（已完成）
 | MPU / tickless | 本包 ThreadX 不含 MPU 扩展和低功耗模块；P3-lite 用 CMSIS 静态 MPU + 栈 guard，动态 per-thread 隔离和 tickless 仍需自建 |
 | tick 粒度 | 100 Hz = 10 ms；控制环/高频采集不能依赖 tick |
 | `-O0` 构建 | 开发默认 `-O0`；`make release` 使用 `-O2` + `APP_RELEASE=1`，P4 已复测 |
-| Flash 参数区 | Control-Node 把 bank 1 最后 16 KB 划给 `PARAM`（`0x080FC000–0x080FFFFF`），记录页在 `0x080FE000`；`0x081FE000` 起 8 KB 是 EDATA，不能当用户区用。**模板 Makefile 尚未加 `-mcmse`**，派生项目要写 Flash 时必须自己补 |
-| 参数页擦除停顿 | 8 KB 扇区擦除实测让 20 kHz 控制中断停顿约 2 ms；控制环不能容忍时需双页轮换 + 擦前 `ctrl off` |
+| Flash 参数区 | Control-Node 把 bank 1 最后 16 KB 划给 `PARAM`（`0x080FC000–0x080FFFFF`），记录页在 `0x080FE000`；`0x081FE000` 起 8 KB 是 EDATA，不能当用户区用。模板已加 `-mcmse`；从旧 Makefile 派生的项目仍需确认 |
+| 参数页擦除停顿/掉电 | 8 KB 扇区擦除实测让 20 kHz 控制中断停顿约 2 ms；当前单页擦除无掉电事务保护，量产前应评估双页轮换，并在擦前 `ctrl off` |
 | 单镜像模板 | 不含 NS 启动链；`THREADX_MODE=NON_SECURE` 不能替代 TrustZone 配置 |
 | 板载无外部存储 | FileX/LevelX 必须外接介质；但**参数/配置小数据可用片内 Flash 参数页**（P4 已实现） |
 | FDCAN 无收发器 | 走 CAN 需外部硬件 |
@@ -310,8 +314,8 @@ P0 基线（已完成）
 2. **已完成**：路线 1 的 P2 控制环 —— 见 [`Tx-Control-Node`](./NUCLEO-H563ZI_THREADX_Tx-Control-Node/README.md)。TIM1 20 kHz、控制 10 kHz、抖动 spread 0.1–3.2 µs、`stall 3` 触发 IWDG。
 3. **已完成**：路线 1 的 P3-lite 容错 —— 静态 MPU（12 regions / 5 guards）、guard→MemManage 归因、连续 3 次故障安全模式、`stall 4` 触发 WWDG。
 4. **已完成**：P4 量产化主体 —— `-O2` 七组自检、`cal` 参数校准与片内 Flash 掉电保存、`release` profile + `release_check.sh`。
-5. **下一步（路线 1）**：把长跑逐步加长到 8/24 h；路线 2 仍可按 P2 做 ADC/DMA + FileX 介质驱动。
-6. **一个季度内**：在 1 h soak 基础上逐步加长到 8/24 h，再做掉电/故障注入，形成验收报告。
+5. **下一步（路线 1）**：完成片内 Flash 物理断电注入（至少覆盖追加编程；若要求擦除边界安全，先做双页方案），再按需要把长跑加长到 8/24 h；路线 2 仍可按 P2 做 ADC/DMA + FileX 介质驱动。
+6. **本轮已完成**：P4 七组 `selfcheck all` 全 PASS；guard/BusFault/IWDG/WWDG 重复注入 35 次全部通过。物理断电注入仍待执行。
 7. **贯穿始终**：每加一个外设或中断，先过 §5.1 检查清单（模式宏、端口完整性、时基分工、NVIC、栈大小），再谈功能。
 
 ---

@@ -34,6 +34,8 @@ P4 增加 release profile（O2、裁掉破坏性命令）、`cal` ADC 参数校�
 | Release profile | `make release`：O2 + `APP_RELEASE=1`，`HELP` 中移除 `guard/stall/crash`（`reboot` 保留）；`release_check.sh` PASS |
 | 自检套件 | `basic` 9、`control` 10、`mpu` 5、`param` 8、`wwdg` 3、`watchdog` 4、`fault` 5 全部 PASS |
 | O2 自检 | `OPT=-O2 ./scripts/selfcheck.sh all` 七组全通过；控制抖动 `49.86/50.16 µs`、`ovr=0` |
+| 重复故障注入 | `fault_matrix.py`：guard 10/10、BusFault 10/10、IWDG 5/5、WWDG 10/10；复位原因及故障记录检查全通过 |
+| P4 收尾复验 | 本轮 `./scripts/selfcheck.sh all` 七组全 PASS；人工断电注入尚未执行 |
 
 ## 引脚与接线
 
@@ -123,7 +125,12 @@ make clean && make APP_PROFILE=release
 ./scripts/selfcheck.sh watchdog  # stall 3 → IWDG 复位
 ./scripts/selfcheck.sh fault     # BusFault 记录与重启报告
 ./scripts/selfcheck.sh all       # 七组顺序执行
+python3 scripts/fault_matrix.py  # guard/crash/IWDG/WWDG 重复注入验收
 ```
+
+`fault_matrix.py` 默认执行 guard ×10、BusFault ×10、IWDG ×5、WWDG ×10；
+可用 `--guard N --crash N --iwdg N --wwdg N` 调整次数。该脚本会重复触发复位，
+只用于开发固件，不要对连接真实执行器的设备运行。
 
 可用 `PORT=/dev/ttyACM0` 覆盖串口。
 
@@ -198,12 +205,15 @@ cal erase           # 擦除整个参数页（回到出厂默认）
 | 预留范围 | `0x080FC000`–`0x080FFFFF`（16 KB，链接脚本 `PARAM` 段） |
 | 记录格式 | 16 B = `magic + offset + scale + CRC32`，正好一个 quad-word |
 | 存储方式 | 追加式日志，512 条/扇区，写满才整扇区擦除一次 |
-| 掉电安全 | 半写记录 CRC 失败被跳过，上一条仍有效 |
+| 追加写中断 | CRC 设计用于跳过无效记录并保留上一条；物理断电尚未实测 |
 | 写一条 | 约 0.1–0.2 ms 停顿（`pause_ms=0`） |
 | 擦一次 | **≈2.0 ms** 停顿（512 次保存才发生一次） |
 
 启动顺序：`app_control_init()` → `app_param_load()` → 有效记录则套用校准；
 `tx_application_define()` 打印 `PARAM addr=0x080fe000 used=n/512 ...`。
+
+当前单扇区满页擦除没有双页事务保护；若擦除期间断电，可能丢失校准值。
+量产前需做物理断电注入；如果要求覆盖擦除边界的掉电安全，应先实现双页轮换。
 
 实现要点（踩过的坑都在 [report.md](./report.md)）：
 

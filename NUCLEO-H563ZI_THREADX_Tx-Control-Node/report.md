@@ -37,6 +37,12 @@
 - P4 追加：`cal` 校准值掉电保存在片内 Flash 参数页（`0x080FE000`），
   重启/重新烧写后自动恢复；`cal 500 1.0` → `fb=adc-500`、`cal 0 0.5` → `fb=adc/2`
   实测吻合；`selfcheck all` 扩为七组（新增 `param`）。
+- P4 收尾复验：`./scripts/selfcheck.sh all` 七组 PASS；新增
+  `fault_matrix.py` 重复注入结果为 guard 10/10、BusFault 10/10、
+  IWDG 5/5、WWDG 10/10，复位原因及故障记录检查均通过。
+- **尚未完成**：物理断电注入。CRC 设计用于跳过被中断的追加记录并保留前一条有效记录，
+  但当前没有实测；参数页满后执行单扇区擦除也没有双页事务保护，断电期间可能丢失
+  校准值。量产前需完成断电测试，若必须覆盖擦除边界则应先实现双页轮换。
 - P2 阶段 `-O0` 固件连续运行约 15 min（控制 ISR `cnt=18,179,997` @20 kHz）无复位；P3-lite 已扩展到 1 h soak。
 
 ## 实现内容
@@ -238,7 +244,8 @@ SOAK PASS seconds=3603.2 status=840 boots=0 faults=0 resets=0 safe=0 drops=0
 - 格式：16 B 记录 `magic("CAL0") + offset + scale + CRC32`，正好是 H5 的
   quad-word 编程粒度。
 - 策略：**追加式日志**。每次保存找一个空槽写一条，512 槽写满才擦一次扇区；
-  掉电导致的半写记录 CRC 校验失败被跳过，上一条仍然有效。
+  CRC 用于识别并跳过半写记录；上一条有效记录应仍可读取，但物理断电行为尚未实测。
+  单扇区擦除期间掉电没有事务保护，可能导致校准值丢失。
 - 启动：`app_control_init()` 里先 `app_param_load()`，读到有效记录立刻套用，
   保证控制 ISR 第一次执行就用正确校准。
 - 观测：`PARAM addr=0x080fe000 used=n/512 slot=m erases=e bank=b err=0`。

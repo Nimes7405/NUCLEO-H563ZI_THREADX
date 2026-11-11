@@ -25,7 +25,9 @@ endif
 
 MCU = cortex-m33
 FPU = -mfpu=fpv5-sp-d16 -mfloat-abi=hard
-CFLAGS = -mcpu=$(MCU) $(FPU) -mthumb -Wall -Wextra -g -O0 -std=c99
+# The verified single-image application runs in Secure state with TZEN enabled.
+# Keep CMSE enabled so HAL secure Flash operations use SECCR/SECKEYR.
+CFLAGS = -mcpu=$(MCU) $(FPU) -mthumb -mcmse -Wall -Wextra -g -O0 -std=c99
 CFLAGS += -ffunction-sections -fdata-sections -MMD -MP
 CFLAGS += -DSTM32H563xx -DHSE_VALUE=8000000UL -DUSE_HAL_DRIVER
 CFLAGS += -DTX_INCLUDE_USER_DEFINE_FILE

@@ -26,7 +26,8 @@ endif
 MCU = cortex-m33
 FPU = -mfpu=fpv5-sp-d16 -mfloat-abi=hard
 OPT ?= -O0
-CFLAGS = -mcpu=$(MCU) $(FPU) -mthumb -Wall -Wextra -g $(OPT) -std=c99
+# Keep the Secure image's CMSE capability available to HAL secure services.
+CFLAGS = -mcpu=$(MCU) $(FPU) -mthumb -mcmse -Wall -Wextra -g $(OPT) -std=c99
 CFLAGS += -ffunction-sections -fdata-sections -MMD -MP
 CFLAGS += -DSTM32H563xx -DHSE_VALUE=8000000UL -DUSE_HAL_DRIVER
 CFLAGS += -DTX_INCLUDE_USER_DEFINE_FILE
