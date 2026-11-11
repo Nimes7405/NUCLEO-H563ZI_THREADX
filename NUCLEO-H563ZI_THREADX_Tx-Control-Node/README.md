@@ -35,7 +35,7 @@ P4 增加 release profile（O2、裁掉破坏性命令）、`cal` ADC 参数校�
 | 自检套件 | `basic` 9、`control` 10、`mpu` 5、`param` 8、`wwdg` 3、`watchdog` 4、`fault` 5 全部 PASS |
 | O2 自检 | `OPT=-O2 ./scripts/selfcheck.sh all` 七组全通过；控制抖动 `49.86/50.16 µs`、`ovr=0` |
 | 重复故障注入 | `fault_matrix.py`：guard 10/10、BusFault 10/10、IWDG 5/5、WWDG 10/10；复位原因及故障记录检查全通过 |
-| P4 收尾复验 | 本轮 `./scripts/selfcheck.sh all` 七组全 PASS；人工断电注入尚未执行 |
+| P4 收尾复验 | 本轮 `./scripts/selfcheck.sh all` 七组全 PASS；写入中掉电注入已决定暂不执行（无可编程电源） |
 
 ## 引脚与接线
 
@@ -213,7 +213,8 @@ cal erase           # 擦除整个参数页（回到出厂默认）
 `tx_application_define()` 打印 `PARAM addr=0x080fe000 used=n/512 ...`。
 
 当前单扇区满页擦除没有双页事务保护；若擦除期间断电，可能丢失校准值。
-量产前需做物理断电注入；如果要求覆盖擦除边界的掉电安全，应先实现双页轮换。
+手头没有可编程电源，写入窗口内精确断电无法可靠复现，因此**写入中掉电注入暂不
+纳入验收**。将来产品要求覆盖该边界时，先实现双页轮换，再用可编程电源测试。
 
 实现要点（踩过的坑都在 [report.md](./report.md)）：
 
