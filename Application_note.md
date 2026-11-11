@@ -63,6 +63,7 @@
 | --- | --- | --- |
 | [`Tx-Reliability-Monitor`](./NUCLEO-H563ZI_THREADX_Tx-Reliability-Monitor/README.md) | 方向 G（P1）+ 缺口 #1–#4、#10、#12 | 板上验证：`selfcheck` basic/watchdog/fault 全通过；205 s 稳定运行；故障记录与 IWDG 复位均实测 |
 | [`Tx-Control-Node`](./NUCLEO-H563ZI_THREADX_Tx-Control-Node/README.md) | 路线 1 P2（方向 A）+ P3-lite（方向 F）+ P4 release/校准 + 方向 G | 板上验证：TIM1 20 kHz / 控制 10 kHz、抖动 spread 0.1–3.2 µs；P3-lite 静态 MPU、guard 归因、安全模式、分级 WWDG；P4 `cal` 参数校准 + **片内 Flash 非易失保存**（写入后复位/重刷保持；写入中掉电未验收，见 §7）、`APP_PROFILE=release` 裁掉破坏性命令；`selfcheck` 七组全通过；1 h O0 soak PASS；O2 `selfcheck all`、O2 15 min soak、`release_check.sh` PASS |
+| [`Tx-FileX-SimDisk`](./NUCLEO-H563ZI_THREADX_Tx-FileX-SimDisk/README.md) | 路线 2 软件栈（方向 B 的 FileX + LevelX 部分）+ 方向 G | 板上验证：RAM 内模拟 NOR（8 块 × 16 扇区 × 512 B）承载 **FileX + LevelX**，FAT 卷 120 扇区；`fs fill 32`、`fs stress 60` 触发 123 次块分配 / 93 个作废扇区 / 2 次块擦除，1→0 违规恒为 0；`selfcheck` 四组（basic/fs/watchdog/fault）全通过 |
 
 > 后续路线可以直接从这两个项目派生：可靠性层（日志、心跳、看门狗、故障记录、
 > 状态台、自检）和控制环骨架（PWM/ADC/DWT/PI）都已经就绪。
@@ -116,7 +117,7 @@
 
 - **场景**：现场无网络，长时间记录振动/温度/电流，事后插卡或连 USB 取数。
 - **为什么适合**：ADC + GPDMA 循环双缓冲；SDMMC1/2 或 SPI NOR；FileX + LevelX 已在包内。
-- **要补什么**：**板载没有 SD 卡座和外部 Flash**，需外接（SD 卡座或 SPI NOR）；FileX 介质驱动；LevelX 磨损均衡；掉电一致性（定期 flush + 双备份索引 + 允许丢尾部 N 秒）；文件轮转与容量策略。
+- **要补什么**：**板载没有 SD 卡座和外部 Flash**，真实介质需外接（SD 卡座或 SPI NOR）；但 **FileX + LevelX 软件栈现在就能验证**——[`Tx-FileX-SimDisk`](./NUCLEO-H563ZI_THREADX_Tx-FileX-SimDisk/README.md) 在 RAM 里模拟 NOR 的擦除/1→0 语义，已跑通 FAT、扇区映射与磨损均衡；真实介质阶段只需替换底层驱动。之后要补：掉电一致性（定期 flush + 双备份索引 + 允许丢尾部 N 秒）、文件轮转与容量策略。
 - **现有基础**：DMA 工程、ADC 工程、ThreadX 队列/事件标志。
 - **工作量/风险**：4–6 周；风险在掉电一致性与介质寿命，必须做"随机断电 ×20"验收。
 
@@ -199,8 +200,8 @@ P4 = `-O2` 七组自检 + `cal` 参数校准（**片内 Flash 非易失保存**�
 
 ```
 P0 基线（已完成）
-  → P1 可观测性（G）
-  → P2 ADC/DMA + FileX/LevelX 记录
+  → P1 可观测性（G，已完成）
+  → P2 ADC/DMA + FileX/LevelX 记录（FileX+LevelX 软件栈已用模拟盘验证）
   → P3 USB 导出（MSC）+ 命令通道（CDC）
   → P4 掉电一致性与长跑
 ```
@@ -231,6 +232,11 @@ P0 基线（已完成）
   `0x081FE000` 起的 8 KB EDATA 区；
   ③ 若开了"Flash 只读"MPU 分区，编程那一刻要临时关 MPU。详见
   [模板 TIPS §7](./NUCLEO-H563ZI_THREADX-SECURE_TEMPLATE/NUCLEO-H563ZI_THREADX_TIPS.md)。
+- **FileX/LevelX 三条**：① FileX 没有 cortex_m33 port，用 `ports/generic/inc`；
+  ② `fx_system_initialize()` 会建定时器，必须在 `tx_application_define()` 里调用；
+  ③ FileX 扇区缓存会吞掉重复写，验证磨损均衡前先 `fx_media_flush()` 并核对
+  驱动层写计数，否则测的是缓存。详见
+  [SimDisk 复盘](./NUCLEO-H563ZI_THREADX_Tx-FileX-SimDisk/report.md)。
 - **Flash 掉电边界**：Control-Node 的追加记录 CRC 能识别半写记录，但物理断电
   未验收；当前单扇区满页擦除也没有双页事务保护。手头没有可编程电源，写入窗口内
   精确断电无法可靠复现，这一步**暂不纳入验收**（见 §7 风险表）；若将来产品要求
@@ -247,9 +253,10 @@ P0 基线（已完成）
 
 - 日志默认走 ST-LINK 虚拟串口：**USART3，PD8/PD9，AF7**（Thread-Sync 已验证）。
 - USB 数据口是板载 USB-C（`USB_DRD_FS`）；ST-LINK 的 USB 只用于调试，不传应用数据。
-- 板载**没有** SD 卡座和外部 Flash：方向 B 必须外接（SD 卡座或 SPI NOR）。
+- 板载**没有** SD 卡座和外部 Flash：方向 B 的真实介质必须外接（SD 卡座或 SPI NOR）。
   但**参数/校准/配置这类小数据不必外接**——片内 2 MB Flash 尾部留一个扇区就够
-  （Control-Node 已实现，见 §6 资产表）。
+  （Control-Node 已实现，见 §6 资产表）；**文件系统软件栈也能先验证**——
+  `Tx-FileX-SimDisk` 用 RAM 模拟 NOR 跑通 FileX + LevelX，接真实介质时只换底层驱动。
 - 片内 Flash 扇区 **8 KB**、2 MB 双 bank（`FLASH_SECTOR_NB=128`/bank）；
   **最后 8 KB（`0x081FE000`）是 EDATA 高擦写区**，只认 EDATA 专用命令，
   不能当普通用户 Flash 用。
@@ -279,6 +286,7 @@ P0 基线（已完成）
 | 可靠性层（IWDG/心跳/故障记录/日志/状态台/自检） | [Tx-Reliability-Monitor](./NUCLEO-H563ZI_THREADX_Tx-Reliability-Monitor/README.md) | 所有派生项目的 P1 基线，可直接复制 |
 | 控制环 + P3-lite 容错（TIM1 PWM + ADC 注入 + 前馈/PI + DWT 抖动 + 静态 MPU + 栈 guard + 安全模式 + 分级 WWDG） | [Tx-Control-Node](./NUCLEO-H563ZI_THREADX_Tx-Control-Node/README.md) | 路线 1 的 P2/P3-lite 基线，可直接替换被控对象 |
 | 片内 Flash 参数页（16 B 记录 + CRC32 + 追加日志 + 扇区轮擦） | [Tx-Control-Node `Core/Src/app_param.c`](./NUCLEO-H563ZI_THREADX_Tx-Control-Node/Core/Src/app_param.c) | **任何需要掉电保存小数据**的项目：校准值、阈值、设备 ID、标定表；路线 2 的配置存储可直接复用 |
+| FileX + LevelX 模拟盘（RAM 模拟 NOR：整块擦除 + 只允许 1→0 + 扇区映射统计） | [Tx-FileX-SimDisk `Core/Src/app_fxdisk.c`](./NUCLEO-H563ZI_THREADX_Tx-FileX-SimDisk/Core/Src/app_fxdisk.c) | **没有外部介质也想验证文件系统**时直接用；接真实 SPI NOR/SD 只换底层驱动，FileX/LevelX 层不动 |
 | release 构建档位 + 命令裁剪（`APP_PROFILE` + `release_check.sh`） | [Tx-Control-Node](./NUCLEO-H563ZI_THREADX_Tx-Control-Node/README.md) | 量产固件裁掉 `guard/stall/crash`，并断言命令确实不存在 |
 | USB 设备栈 + USB-PD 附着 | [USBX HID](../NUCLEO-H563ZI_USBX_Ux-Device-Human-Interface/report.md) | 方向 C 的直接起点 |
 | 故障排障方法（INVPC → CFSR/EXC_RETURN） | [USBX HID 报告](../NUCLEO-H563ZI_USBX_Ux-Device-Human-Interface/report.md) | 下次 10 分钟定位同类问题 |
@@ -315,9 +323,10 @@ P0 基线（已完成）
 2. **已完成**：路线 1 的 P2 控制环 —— 见 [`Tx-Control-Node`](./NUCLEO-H563ZI_THREADX_Tx-Control-Node/README.md)。TIM1 20 kHz、控制 10 kHz、抖动 spread 0.1–3.2 µs、`stall 3` 触发 IWDG。
 3. **已完成**：路线 1 的 P3-lite 容错 —— 静态 MPU（12 regions / 5 guards）、guard→MemManage 归因、连续 3 次故障安全模式、`stall 4` 触发 WWDG。
 4. **已完成**：P4 量产化主体 —— `-O2` 七组自检、`cal` 参数校准与片内 Flash 掉电保存、`release` profile + `release_check.sh`。
-5. **下一步（路线 1）**：按需要把长跑加长到 8/24 h；路线 2 仍可按 P2 做 ADC/DMA + FileX 介质驱动。
-6. **已完成**：P4 七组 `selfcheck all` 全 PASS；guard/BusFault/IWDG/WWDG 重复注入 35 次全部通过。**片内 Flash 写入中掉电注入已决定暂不执行**（无可编程电源），后续有设备或产品强制要求时再做，届时先实现双页轮换。
-7. **贯穿始终**：每加一个外设或中断，先过 §5.1 检查清单（模式宏、端口完整性、时基分工、NVIC、栈大小），再谈功能。
+5. **已完成**：路线 2 的文件系统软件栈 —— [`Tx-FileX-SimDisk`](./NUCLEO-H563ZI_THREADX_Tx-FileX-SimDisk/README.md) 用 RAM 模拟 NOR 跑通 FileX + LevelX（FAT、扇区映射、块回收、磨损均衡），四组自检全 PASS。
+6. **下一步**：路线 1 按需要把长跑加长到 8/24 h；路线 2 接 ADC/DMA 采集 + 真实介质（或继续用模拟盘验证文件轮转逻辑）。
+7. **已完成**：P4 七组 `selfcheck all` 全 PASS；guard/BusFault/IWDG/WWDG 重复注入 35 次全部通过。**片内 Flash 写入中掉电注入已决定暂不执行**（无可编程电源），后续有设备或产品强制要求时再做，届时先实现双页轮换。
+8. **贯穿始终**：每加一个外设或中断，先过 §5.1 检查清单（模式宏、端口完整性、时基分工、NVIC、栈大小），再谈功能。
 
 ---
 

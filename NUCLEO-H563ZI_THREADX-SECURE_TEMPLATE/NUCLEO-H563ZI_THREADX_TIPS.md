@@ -187,6 +187,29 @@ Secure 单镜像下有三个必踩的坑：
 [`Tx-Control-Node`](../NUCLEO-H563ZI_THREADX_Tx-Control-Node/README.md)
 的 `Core/Src/app_param.c` 与其 `report.md` §「参数存储踩的四个坑」。
 
+## 8. 接入 FileX / LevelX（文件系统）
+
+板载没有 SD 卡座和外部 Flash，但 FileX + LevelX 可以先用 RAM 模拟 NOR 验证，
+接真实介质时只换底层驱动。参考
+[`Tx-FileX-SimDisk`](../NUCLEO-H563ZI_THREADX_Tx-FileX-SimDisk/README.md)。
+
+三条必须知道：
+
+1. **FileX 没有 cortex_m33 port**。`fx_api.h` 需要 `fx_port.h`，包内只有
+   cortex_m0/m3/m4/m7、generic、linux、win32。加
+   `-I$(FILEX_DIR)/ports/generic/inc` 即可，可移植 port 不依赖具体内核指令。
+2. **`fx_system_initialize()` 必须在 `tx_application_define()` 里调用**。
+   它内部会 `tx_timer_create` 创建 FileX 系统定时器；格式化/挂载这类 I/O
+   放到线程入口，别在内核对象创建阶段做。
+3. **FileX 扇区缓存会吞掉重复写**。同一逻辑扇区会长期留在 `media_memory`
+   缓存里，`fx_file_close()` 不强制落盘；实测 60 次"truncate+write+close"
+   只产生 1 次真实扇区写。验证磨损均衡/擦除前必须显式 `fx_media_flush()`，
+   并在驱动里统计读写次数，否则测的是缓存而不是闪存。
+
+磨损均衡需要让 FileX 通知驱动哪些扇区不再使用：
+`media_ptr->fx_media_driver_free_sector_update = FX_TRUE`，再在
+`FX_DRIVER_RELEASE_SECTORS` 里调用 `lx_nor_flash_sector_release()`。
+
 本指南记录的是模板的通用 ThreadX/TrustZone 约束；项目级原始移植过程和
 USBX 专项经验仍保留在 USBX HID 工程的 `report.md` 与
 `NUCLEO-H563ZI_TIPS.md` 中。
