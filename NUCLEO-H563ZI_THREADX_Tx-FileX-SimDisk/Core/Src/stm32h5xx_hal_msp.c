@@ -1,5 +1,6 @@
 #include "main.h"
 
+
 void HAL_MspInit(void)
 {
 }
@@ -9,6 +10,10 @@ void HAL_TIM_Base_MspInit(TIM_HandleTypeDef *htim)
   if (htim->Instance == TIM6)
   {
     __HAL_RCC_TIM6_CLK_ENABLE();
+  }
+  else if (htim->Instance == TIM3)
+  {
+    __HAL_RCC_TIM3_CLK_ENABLE();
   }
 }
 
@@ -36,5 +41,25 @@ void HAL_UART_MspInit(UART_HandleTypeDef *huart)
     gpio.Speed = GPIO_SPEED_FREQ_LOW;
     gpio.Alternate = GPIO_AF7_USART3;
     HAL_GPIO_Init(GPIOD, &gpio);
+  }
+}
+
+void HAL_ADC_MspInit(ADC_HandleTypeDef *hadc)
+{
+  if (hadc->Instance == ADC1)
+  {
+    GPIO_InitTypeDef gpio = {0};
+
+    __HAL_RCC_ADC_CLK_ENABLE();
+    __HAL_RCC_GPIOC_CLK_ENABLE();
+
+    /* PC0 -> ADC1_INP10, Arduino A1 / CN9 pin 3. */
+    gpio.Pin = GPIO_PIN_0;
+    gpio.Mode = GPIO_MODE_ANALOG;
+    gpio.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(GPIOC, &gpio);
+
+    HAL_NVIC_SetPriority(ADC1_IRQn, 5U, 0U);
+    HAL_NVIC_EnableIRQ(ADC1_IRQn);
   }
 }

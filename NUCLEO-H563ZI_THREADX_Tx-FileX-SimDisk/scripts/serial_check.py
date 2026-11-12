@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Serial assertions for the Tx-Reliability-Monitor firmware."""
+"""Serial assertions for the Tx-FileX-SimDisk firmware."""
 
 import argparse
 import os
+import re
 import select
 import sys
 import termios
@@ -219,11 +220,69 @@ def mode_fs(port):
     return ok
 
 
+def mode_acq(port):
+    port.drain_quiet()
+
+    port.clear()
+    port.send("fs format")
+    ok = check(port, "acq-fresh-volume", port.wait_for("FS format=ok rc=0", 15.0),
+               "FS format=ok rc=0")
+
+    port.clear()
+    port.send("acq start")
+    ok &= check(port, "acq-start", port.wait_for("ACQ start=ok rc=0", 5.0),
+                "ACQ start=ok rc=0")
+
+    port.read_for(9.0)
+
+    port.clear()
+    port.send("acq stop")
+    ok &= check(port, "acq-stop", port.wait_for("ACQ stop=ok", 5.0), "ACQ stop=ok")
+
+    port.clear()
+    port.send("acq info")
+    ok &= check(port, "acq-stopped", port.wait_for("ACQ running=0", 5.0), "ACQ running=0")
+    port.read_for(0.6)
+    text = port.text()
+    match = re.search(r"ACQ running=0 file=(\S+) windows=(\d+) samples=(\d+) "
+                      r"files=(\d+) min=(\d+) max=(\d+) drop=(\d+)", text)
+    ok &= check(port, "acq-stats", match is not None, "ACQ running=0 ...")
+    if match:
+        windows = int(match.group(2))
+        samples = int(match.group(3))
+        files = int(match.group(4))
+        low = int(match.group(5))
+        high = int(match.group(6))
+        drops = int(match.group(7))
+        ok &= check(port, "acq-windows", windows >= 120, f"windows>={120} (got {windows})")
+        ok &= check(port, "acq-rate", abs(samples - windows * 500) == 0,
+                    "samples == windows*500")
+        ok &= check(port, "acq-no-drop", drops == 0, f"drop=0 (got {drops})")
+        ok &= check(port, "acq-adc-range", (high <= 4095) and (high >= low),
+                    "0 <= min <= max <= 4095")
+        ok &= check(port, "acq-rotated", files >= 2, f"files>=2 (got {files})")
+
+    port.clear()
+    port.send("fs ls")
+    ok &= check(port, "acq-file-0", port.wait_for("FS f=LOG0000.CSV", 5.0), "FS f=LOG0000.CSV")
+    ok &= check(port, "acq-file-1", port.wait_for("FS f=LOG0001.CSV", 5.0), "FS f=LOG0001.CSV")
+
+    port.clear()
+    port.send("acq check")
+    ok &= check(port, "acq-check", port.wait_for("ACQ CHECK PASS", 8.0), "ACQ CHECK PASS")
+
+    port.clear()
+    port.send("fs format")
+    ok &= check(port, "acq-cleanup", port.wait_for("FS format=ok rc=0", 15.0),
+                "FS format=ok rc=0")
+    return ok
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", default="/dev/ttyACM0")
     parser.add_argument("--baud", type=int, default=115200)
-    parser.add_argument("--mode", choices=["basic", "fs", "watchdog", "fault"], default="basic")
+    parser.add_argument("--mode", choices=["basic", "fs", "acq", "watchdog", "fault"], default="basic")
     args = parser.parse_args()
 
     port = Port(args.port, args.baud)
@@ -234,6 +293,8 @@ def main():
             ok = mode_basic(port)
         elif args.mode == "fs":
             ok = mode_fs(port)
+        elif args.mode == "acq":
+            ok = mode_acq(port)
         elif args.mode == "watchdog":
             ok = mode_watchdog(port)
         else:

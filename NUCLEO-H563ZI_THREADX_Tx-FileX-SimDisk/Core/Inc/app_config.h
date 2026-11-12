@@ -15,11 +15,13 @@
 #define APP_PRIO_CONSOLE        8U
 #define APP_PRIO_PROD_A         10U
 #define APP_PRIO_PROD_B         11U
+#define APP_PRIO_SAMPLER        5U
 #define APP_PRIO_LOGGER         20U
 
 #define APP_STACK_MONITOR       2048U
 #define APP_STACK_LOGGER        1024U
 #define APP_STACK_CONSOLE       4096U
+#define APP_STACK_SAMPLER       2048U
 #define APP_STACK_PROD_A        2048U
 #define APP_STACK_PROD_B        2048U
 
@@ -41,6 +43,7 @@ typedef enum
   APP_HB_CONSOLE,
   APP_HB_PROD_A,
   APP_HB_PROD_B,
+  APP_HB_SAMPLER,
   APP_HB_COUNT
 } app_hb_id_t;
 

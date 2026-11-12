@@ -10,6 +10,7 @@ typedef enum
   APP_STK_CONSOLE,
   APP_STK_PROD_A,
   APP_STK_PROD_B,
+  APP_STK_SAMPLER,
   APP_STK_COUNT
 } app_stack_id_t;
 

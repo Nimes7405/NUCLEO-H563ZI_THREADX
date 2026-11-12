@@ -11,6 +11,7 @@
 #define HAL_TIM_MODULE_ENABLED
 #define HAL_UART_MODULE_ENABLED
 #define HAL_IWDG_MODULE_ENABLED
+#define HAL_ADC_MODULE_ENABLED
 
 #define HSE_VALUE 8000000UL
 #define HSE_STARTUP_TIMEOUT 100UL
@@ -75,6 +76,10 @@
 #endif
 #ifdef HAL_IWDG_MODULE_ENABLED
 #include "stm32h5xx_hal_iwdg.h"
+#endif
+#ifdef HAL_ADC_MODULE_ENABLED
+#include "stm32h5xx_hal_adc.h"
+#include "stm32h5xx_hal_adc_ex.h"
 #endif
 
 #ifdef USE_FULL_ASSERT

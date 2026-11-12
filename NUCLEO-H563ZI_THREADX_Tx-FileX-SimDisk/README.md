@@ -6,7 +6,9 @@
 派生，继承日志、看门狗、故障记录、状态台与一键自检；本次新增文件系统层。
 
 对应 [Application Note](../Application_note.md) 路线 2（数据记录仪）的
-**软件栈验证阶段**：先把 FileX + LevelX 跑通，再谈真实介质。
+**软件栈验证阶段**：先把 FileX + LevelX 和"采集 → 落盘 → 回读校验"这条链路
+跑通，再谈真实介质。当前链路：TIM3 10 kHz 触发 ADC1 → 环形缓冲 →
+50 ms 窗口统计 → CSV 追加 → 2 KB 轮转 → `acq check` 逐行回读校验。
 
 ## 为什么要模拟盘
 
@@ -31,6 +33,9 @@
 | 磨损均衡 | LevelX NOR | 逻辑扇区→物理扇区映射、作废标记、块回收 |
 | 物理介质 | `app_fxdisk.c` 中的 RAM 模拟 NOR | 8 块 × 16 扇区 × 512 B = 64 KiB；每块 1 扇区做元数据，可用 120 逻辑扇区 |
 | 观测 | `FSD` 状态行 | 驱动读/写次数、LevelX 块分配/作废/空闲、每块擦除计数、**1→0 违规计数** |
+| 采集 | TIM3 10 kHz 触发 ADC1（PC0/A1），EOC 中断写入 1024 点环形缓冲 | 采样线程按 50 ms 窗口统计 min/max/avg，追加到 CSV |
+| 落盘 | `LOGnnnn.CSV`（序号,min,max,avg,count），2 KB 轮转，保留 4 个文件 | 复用上面的 FileX/LevelX 盘；文件句柄常开，关闭时 `fx_media_flush` |
+| 回读校验 | `acq check` 逐行解析最新日志 | 校验字段数、`min ≤ avg ≤ max`、最大值 ≤ 4095、每行 500 样本 |
 
 `violations=0` 是关键指标：它统计"尝试把 0 写成 1"的次数。恒为 0 说明 LevelX
 每次都先擦除再写，没有依赖"RAM 可以任意覆盖"的假象。
@@ -49,7 +54,11 @@
 | 重复改写 | `fs stress 60`：127 次扇区写、123 次块分配、93 个作废扇区、2 次块擦除，`violations=0`，校验全通过 |
 | 卸载/重挂 | `fs umount` → `fs mount` 后数据仍在（`FS f=FILL.BIN`） |
 | 重新格式化 | `fs format` → `FS format=ok rc=0`，`fs count=0` |
-| 一键自检 | `./scripts/selfcheck.sh all`：`basic` 9、`fs` 19、`watchdog` 4、`fault` 5 全部 PASS |
+| 采集 → 落盘 | `acq start` 3 s：`windows=61 samples=30500 drop=0`（≈10 kHz），日志行 `0,467,810,519,500` |
+| 文件轮转 | 9 s 采集写入 `LOG0000.CSV`(2053 B) + `LOG0001.CSV`(1617 B)，`files=2` |
+| 回读校验 | `acq check` → `ACQ CHECK PASS lines=77 samples=38500 min=325 max=545` |
+| 线程栈 | `sampler=1376/2048`、`console=1480/4096`、`monitor=1008/2048` |
+| 一键自检 | `./scripts/selfcheck.sh all`：`basic` 9、`fs` 19、`acq` 14、`watchdog` 4、`fault` 5 全部 PASS |
 
 ## 串口命令
 
@@ -69,7 +78,11 @@ USART3（ST-LINK 虚拟串口，PD8/PD9，115200 8N1）。可靠性层命令
 | `fs test` | 写→读→比对→删→确认读失败，输出 `FS SELFTEST PASS/FAIL` |
 | `fs fill <1..48>` | 写入 N KiB 伪随机图案并逐字节校验，触发多块分配与擦除 |
 | `fs stress <1..500>` | 重复"覆盖写 + 校验"N 次，驱动 LevelX 块回收与磨损均衡 |
-| `fs format` / `fs mount` / `fs umount` | 重新格式化 / 挂载 / 卸载 |
+| `fs format` / `fs mount` / `fs umount` | 重新格式化 / 挂载 / 卸载（采集中拒绝执行） |
+| `acq start` / `acq stop` | 开始/停止采集并写日志文件 |
+| `acq info` | 运行状态、当前文件、窗口数、样本数、文件数、min/max、环形缓冲丢弃 |
+| `acq check` | 回读最新日志并逐行校验，输出 `ACQ CHECK PASS/FAIL` |
+| `acq selftest` | 采集 1.5 s → 停止 → 校验，一条命令验证整条链路 |
 
 ## 构建与烧写
 
@@ -92,9 +105,10 @@ ARM GNU 工具链和 OpenOCD。Makefile 引入：
 ```sh
 ./scripts/selfcheck.sh basic     # 构建 + 符号 + 烧写 + 状态/栈/故障/日志
 ./scripts/selfcheck.sh fs        # 文件系统 19 项断言
+./scripts/selfcheck.sh acq       # 采集→落盘→回读 14 项断言
 ./scripts/selfcheck.sh watchdog  # 线程卡死 → IWDG 复位
 ./scripts/selfcheck.sh fault     # BusFault 记录与重启报告
-./scripts/selfcheck.sh all       # 四组顺序执行
+./scripts/selfcheck.sh all       # 五组顺序执行
 ```
 
 可用 `PORT=/dev/ttyACM0` 覆盖串口。
@@ -129,6 +143,10 @@ scripts/      selfcheck.sh, serial_check.py
 - **初始化时机**：`fx_system_initialize()` 会创建 FileX 系统定时器，必须在
   `tx_application_define()` 里调用；格式化/挂载放在 console 线程入口，
   避免在内核对象创建阶段做 I/O。
+- **采集不用 DMA**：TIM3 10 kHz 产生 TRGO 触发 ADC1 常规组，EOC 中断只做
+  "读 DR + 入环形缓冲"（1024 点）。采样线程每 50 ms 取 500 点统计后落盘。
+  这样控制环/日志线程不受影响，也避开了已验证失败但根因未定的 GPDMA 路径
+  （详见 [report.md](./report.md)）。
 
 ## 已知限制
 

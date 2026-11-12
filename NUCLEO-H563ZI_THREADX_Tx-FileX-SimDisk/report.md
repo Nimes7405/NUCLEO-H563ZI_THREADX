@@ -25,8 +25,13 @@
 - `fs stress 60`：127 次真实扇区写、123 次块分配、93 个作废扇区、2 次块擦除，
   每一步都读回校验，`violations=0`。
 - `fs umount` → `fs mount` 后数据仍在；`fs format` 后目录清空。
-- `./scripts/selfcheck.sh all`：`basic` 9、`fs` 19、`watchdog` 4、`fault` 5
-  全部 PASS。
+- 采集 → 落盘：`acq start` 3 s → `windows=61 samples=30500 drop=0`（≈10 kHz）；
+  日志行 `0,467,810,519,500`（序号, min, max, avg, count）。
+- 文件轮转：9 s 采集写出 `LOG0000.CSV`(2053 B) + `LOG0001.CSV`(1617 B)。
+- 回读校验：`acq check` → `ACQ CHECK PASS lines=77 samples=38500 min=325 max=545`。
+- 线程栈：`sampler=1376/2048`、`console=1480/4096`、`monitor=1008/2048`。
+- `./scripts/selfcheck.sh all`：`basic` 9、`fs` 19、`acq` 14、`watchdog` 4、
+  `fault` 5 全部 PASS。
 
 ## 实现
 
@@ -61,6 +66,43 @@ if ((value & ~current) != 0U) { sim_bit_violations++; value &= current; }
 
 `violations` 不作为错误返回，只做观测——如果 LevelX 逻辑正常，它应该恒为 0。
 实测 `fs fill 32` 与 `fs stress 60` 之后都是 0，说明确实每次先擦后写。
+
+## 采集链路
+
+### 为什么用 EOC 中断而不是 DMA
+
+原计划是 TIM3 触发 ADC + GPDMA 循环搬运。GPDMA 链表配置（对照 ST 官方
+`NUCLEO-H533RE/ADC_MultiChannelSingleConversion` 逐项对齐）能起来，但**数据不落内存**，
+排查过程与证据如下，最终改用 ADC EOC 中断：
+
+| 现象 | 观测 |
+| --- | --- |
+| 最初 | `HAL_ADC_Start_DMA` 返回 OK，但 ADC/DMA 错误码均为 `0x04`（`HAL_DMA_ERROR_USE`） |
+| 定位 1 | 通道属性：TZEN 下 GPDMA 通道默认非安全/非特权，而 ADC 的 DR 走安全别名 `0x5202_8040`；补通道属性 `DMA_CHANNEL_PRIV` + `DMA_CHANNEL_SEC` 后 USEF 消失 |
+| 定位 2 | 链表可访问端口：内存侧改到 `PORT1`、链表也放 `PORT1` 后，DMA 不再报错 |
+| 定位 3 | 还要给 TIM3 开时钟（`HAL_TIM_Base_MspInit` 只开了 TIM6），否则无触发、无 DMA 请求 |
+| 剩余问题 | 修复后 DMA 的 `CBR1` 正常递减（10 kHz 触发、HT/TC 中断都来），但缓冲区内容不变：CPU 在 `0x2001_89a0` 读到的是自己写入的图案，DMA 的 `CDAR` 也从该地址递增，安全别名 `0x3001_89a0` 同样读不到。**传输被"计数"了，数据没落地** |
+| 结论 | 未确认根因（怀疑 GPDMA 对 SRAM 页的安全属性/端口可达性）；先改用 EOC 中断保证功能可用 |
+
+EOC 中断方案：TIM3 10 kHz TRGO 触发 ADC1 常规组，`HAL_ADC_ConvCpltCallback`
+只做"读 DR + 写环形缓冲"，环形缓冲 1024 点；采样线程每 50 ms 取 500 点统计。
+实测 3 s 得 30,500 样本（10 kHz）、`drop=0`、`sampler` 栈 1376/2048。
+
+**遗留**：更高采样率或更低 CPU 占用仍需 DMA，下一步应先用最小 mem2mem 链表
+传输验证 GPDMA 在本板 Secure 配置下能否写 SRAM，再回到 ADC 路径。
+
+### 记录格式与轮转
+
+- 每 50 ms 一行：`序号,min,max,avg,count`，例如 `0,467,810,519,500`。
+- 单文件 2 KB 轮转，文件名 `LOG0000.CSV`…`LOG0003.CSV` 循环覆盖，最多 4 个文件。
+- 文件句柄常开（不每次 open/close），写入后靠 `fx_media_flush` 落盘；
+  采集中禁止 `fs format` / `fs umount`，避免把正在写的卷拆掉。
+
+### 回读校验
+
+`acq check` 用 `app_fxdisk_read_stream` 流式读取最新日志，逐行校验：
+字段数必须为 5、`min ≤ avg ≤ max`、`max ≤ 4095`、`count` 必须等于 500。
+任何一行不满足即输出 `ACQ CHECK FAIL ... line=N`，便于定位是第几行坏了。
 
 ## 踩到的问题
 
@@ -120,18 +162,26 @@ RAM 上电是 0x00 而不是擦除态 0xFF。模拟后端在第一次初始化�
 
 ## 尚未覆盖
 
+- **DMA 采样**：GPDMA 链表传输在本板上"计数但不落内存"，根因未定（见上节）。
+  之前留下的 `app_acq` DMA 代码已删除，避免带病路径混进固件；后续按
+  "最小 mem2mem 验证 → ADC DMA"的顺序重做。
+- **采集与日志解耦**：当前采样线程自己写文件，写 Flash 期间该线程被占用；
+  真实产品应改成"采样线程只入队，独立 writer 线程落盘"。
+- **时间戳**：日志只有窗口序号，没有绝对时间；接 RTC 后应记录起始时间。
 - **掉电一致性**：RAM 盘复位即失，这一层无法验证。真实介质阶段需要单独设计
   （日志式写入 / 双索引 / 允许丢尾部 N 秒）并做断电注入。
 - **擦除延时与取指停顿**：RAM 擦除是瞬时完成的，测不出真实 NOR 的擦除时间，
   也测不出擦除期间同 bank 取指的停顿。
 - **容量与性能**：60 KiB 只能验证功能；真实介质要按容量重算簇大小、FAT 类型，
   并测写入吞吐。
-- **并发**：目前所有文件操作都在 console 线程里串行执行，没有多线程同时读写
-  同一媒体的测试（FileX 自带媒体互斥，但未实测）。
+- **并发**：采样线程写日志、console 线程做 `fs` 操作，两者共用 FileX 媒体互斥；
+  已验证不会互相破坏，但没有做高并发压力测试。
 
 ## 下一步
 
 1. 有 SPI NOR / SD 卡后，替换 `app_fxdisk.c` 的底层读写为真实驱动，
-   保持 FileX/LevelX 层不变，先跑同一套 `fs` 自检。
-2. 接入 ADC/DMA 采集，把采样数据按文件轮转写入，形成路线 2 的完整数据记录仪。
-3. 真实介质上做掉电注入与介质寿命评估。
+   保持 FileX/LevelX 层不变，先跑同一套 `fs` + `acq` 自检。
+2. 用最小 mem2mem 链表传输定位 GPDMA 不落内存的根因，再恢复 ADC DMA 采样，
+   为更高采样率留出 CPU 余量。
+3. 加 RTC 时间戳与文件头（起始时间、采样率、通道），让日志能脱离固件解读。
+4. 真实介质上做掉电注入与介质寿命评估。

@@ -1,5 +1,6 @@
 #include "main.h"
 #include "tx_api.h"
+#include "app_acq.h"
 #include "app_config.h"
 #include "app_console.h"
 #include "app_fault.h"
@@ -22,6 +23,7 @@ int main(void)
   app_reset_cause_clear();
   app_fault_init(reset_raw);
   app_watchdog_init();
+  app_acq_init();
 
   tx_kernel_enter();
 

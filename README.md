@@ -9,8 +9,8 @@
 | [`NUCLEO-H563ZI_THREADX-SECURE_TEMPLATE`](./NUCLEO-H563ZI_THREADX-SECURE_TEMPLATE/README.md) | 单镜像 Secure 模板：ThreadX 6.4.0 + HAL，SysTick 100 Hz、HAL 1 ms 走 TIM6、静态线程 + LED3 心跳 | 已复核构建（`-O0`：Flash 15.0 KB / RAM 4.3 KB）；板上心跳待目视确认 |
 | [`NUCLEO-H563ZI_THREADX_Tx-Reliability-Monitor`](./NUCLEO-H563ZI_THREADX_Tx-Reliability-Monitor/README.md) | P1 可靠性层：IWDG + 线程心跳、故障记录、环形日志、USART3 状态台、栈水位、一键自检 | 已在板上验证（`selfcheck` basic/watchdog/fault 全通过；205 s 稳定运行） |
 | [`NUCLEO-H563ZI_THREADX_Tx-Control-Node`](./NUCLEO-H563ZI_THREADX_Tx-Control-Node/README.md) | 路线 1：TIM1 PWM + ADC 注入同步、10 kHz 前馈 + PI 控制环、DWT 抖动实测、软件/ADC 双反馈；P3-lite 静态 MPU + 栈 guard + 安全模式 + 分级 WWDG；P4 release profile + `cal` 参数校准 + 片内 Flash 掉电保存 | 已在板上验证（`selfcheck` 七组全通过；1 h O0 soak PASS；O2 `selfcheck all` 七组 PASS；`release_check.sh` PASS；校准值重启/重烧后保持） |
-| [`NUCLEO-H563ZI_THREADX_Tx-FileX-SimDisk`](./NUCLEO-H563ZI_THREADX_Tx-FileX-SimDisk/README.md) | 路线 2 软件栈：RAM 内模拟 NOR（擦除 + 只允许 1→0）承载 FileX + LevelX，`fs` 命令族做文件/目录/压力操作，无需 SD 卡或外部 Flash | 已在板上验证（`selfcheck` basic/fs/watchdog/fault 全通过；`fs stress` 触发真实块回收与擦除，1→0 违规为 0） |
-| `NUCLEO-H563ZI_THREADX_Tx-Data-Logger`（规划） | 路线 2 完整版：ADC/DMA 采集 + 真实介质记录 + USB 导出 | FileX/LevelX 软件栈已由 SimDisk 验证；真实介质与采集待做 |
+| [`NUCLEO-H563ZI_THREADX_Tx-FileX-SimDisk`](./NUCLEO-H563ZI_THREADX_Tx-FileX-SimDisk/README.md) | 路线 2 软件栈：RAM 内模拟 NOR（擦除 + 只允许 1→0）承载 FileX + LevelX；TIM3 10 kHz 触发 ADC1 → 环形缓冲 → CSV 落盘 → 2 KB 轮转 → 回读校验，无需 SD 卡或外部 Flash | 已在板上验证（`selfcheck` basic/fs/acq/watchdog/fault 全通过；`fs stress` 触发真实块回收与擦除，1→0 违规为 0；采集 10 kHz、`drop=0`、`acq check` 逐行校验通过） |
+| `NUCLEO-H563ZI_THREADX_Tx-Data-Logger`（规划） | 路线 2 完整版：DMA 采集 + 真实介质记录 + USB 导出 | FileX/LevelX 与采集落盘已由 SimDisk 验证；GPDMA 采样与真实介质待做 |
 | `NUCLEO-H563ZI_THREADX_Tx-Bench-Tool`（规划，主机侧） | 串口日志抓取、抖动/栈水位分析、长跑报告 | 规划中 |
 
 相关（不在本 workspace 内）：

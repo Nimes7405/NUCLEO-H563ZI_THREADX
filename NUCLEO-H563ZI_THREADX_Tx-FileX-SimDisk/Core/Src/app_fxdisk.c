@@ -24,6 +24,9 @@ static ULONG sim_fx_write_ops;
 static ULONG sim_fx_sectors_written;
 static UINT sim_flash_prepared;
 
+static FX_FILE log_file;
+static UINT log_file_open;
+
 static LX_NOR_FLASH nor_flash;
 static FX_MEDIA sim_media;
 static UCHAR media_memory[1024];
@@ -585,4 +588,107 @@ int app_fxdisk_verify_pattern(const char *name, uint32_t len, uint32_t seed)
 
   (void)fx_file_close(&file);
   return (offset == len) ? 0 : -3;
+}
+
+int app_fxdisk_log_open(const char *name)
+{
+  UINT status;
+
+  if (disk_mounted == 0U)
+  {
+    return -1;
+  }
+  (void)app_fxdisk_log_close();
+
+  (void)fx_file_create(&sim_media, (CHAR *)name);
+  status = fx_file_open(&sim_media, &log_file, (CHAR *)name, FX_OPEN_FOR_WRITE);
+  if (status != FX_SUCCESS)
+  {
+    return (int)status;
+  }
+
+  log_file_open = 1U;
+  (void)fx_file_truncate(&log_file, 0UL);
+  return 0;
+}
+
+int app_fxdisk_log_write(const void *data, uint32_t len)
+{
+  if (log_file_open == 0U)
+  {
+    return -1;
+  }
+  return (fx_file_write(&log_file, (VOID *)data, (ULONG)len) == FX_SUCCESS) ? 0 : -2;
+}
+
+int app_fxdisk_log_close(void)
+{
+  if (log_file_open == 0U)
+  {
+    return 0;
+  }
+
+  (void)fx_file_close(&log_file);
+  (void)fx_media_flush(&sim_media);
+  log_file_open = 0U;
+  return 0;
+}
+
+int app_fxdisk_log_size(uint32_t *size)
+{
+  if ((log_file_open == 0U) || (size == NULL))
+  {
+    return -1;
+  }
+  *size = (uint32_t)log_file.fx_file_current_file_size;
+  return 0;
+}
+
+int app_fxdisk_read_stream(const char *name, app_fxdisk_chunk_fn fn, void *ctx, uint32_t *total)
+{
+  static UCHAR chunk[256];
+  FX_FILE file;
+  UINT status;
+  ULONG actual = 0UL;
+  uint32_t sum = 0U;
+
+  if (disk_mounted == 0U)
+  {
+    return -1;
+  }
+
+  status = fx_file_open(&sim_media, &file, (CHAR *)name, FX_OPEN_FOR_READ);
+  if (status != FX_SUCCESS)
+  {
+    return (int)status;
+  }
+
+  do
+  {
+    status = fx_file_read(&file, chunk, (ULONG)sizeof(chunk), &actual);
+    if ((status != FX_SUCCESS) || (actual == 0UL))
+    {
+      break;
+    }
+    if (fn != NULL)
+    {
+      if (fn((const char *)chunk, (uint32_t)actual, ctx) != 0)
+      {
+        (void)fx_file_close(&file);
+        return -2;
+      }
+    }
+    sum += (uint32_t)actual;
+  } while (actual > 0UL);
+
+  (void)fx_file_close(&file);
+  if (total != NULL)
+  {
+    *total = sum;
+  }
+  if ((status == FX_SUCCESS) || (status == FX_END_OF_FILE))
+  {
+    return 0;
+  }
+  return (int)status;
 }

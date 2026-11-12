@@ -54,6 +54,8 @@ INC_PATHS = \
 
 HAL_SRCS = \
 	$(HAL_DIR)/Src/stm32h5xx_hal.c \
+	$(HAL_DIR)/Src/stm32h5xx_hal_adc.c \
+	$(HAL_DIR)/Src/stm32h5xx_hal_adc_ex.c \
 	$(HAL_DIR)/Src/stm32h5xx_hal_cortex.c \
 	$(HAL_DIR)/Src/stm32h5xx_hal_dma.c \
 	$(HAL_DIR)/Src/stm32h5xx_hal_dma_ex.c \
@@ -98,6 +100,7 @@ APP_SRCS = \
 	Core/Src/app_watchdog.c \
 	Core/Src/app_stacks.c \
 	Core/Src/app_fxdisk.c \
+	Core/Src/app_acq.c \
 	Core/Src/syscalls.c \
 	Core/Src/stm32h5xx_hal_msp.c \
 	Core/Src/stm32h5xx_hal_timebase_tim.c \

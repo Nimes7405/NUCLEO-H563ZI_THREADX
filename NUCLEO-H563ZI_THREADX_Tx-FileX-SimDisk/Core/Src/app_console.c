@@ -1,4 +1,5 @@
 #include "app_console.h"
+#include "app_acq.h"
 #include "app_config.h"
 #include "app_fault.h"
 #include "app_fxdisk.h"
@@ -23,6 +24,7 @@ static uint32_t line_len;
 static void console_dispatch(char *line);
 static void console_fault_report(void);
 static void console_help(void);
+static void console_acq(const char *arg);
 static void console_fs(const char *arg);
 static void console_stall(const char *arg);
 
@@ -149,7 +151,7 @@ void app_console_status(void)
 {
   uint32_t uptime_ms = (uint32_t)((uint64_t)tx_time_get() * 10U);
 
-  app_log_printf("STATUS ver=%s uptime_ms=%lu reset=%s wdg_feed=%lu hb=%lu,%lu,%lu,%lu,%lu drop=%lu rx_drop=%lu\r\n",
+  app_log_printf("STATUS ver=%s uptime_ms=%lu reset=%s wdg_feed=%lu hb=%lu,%lu,%lu,%lu,%lu,%lu drop=%lu rx_drop=%lu\r\n",
                  APP_VERSION,
                  (unsigned long)uptime_ms,
                  app_boot_reset_name(),
@@ -159,13 +161,14 @@ void app_console_status(void)
                  (unsigned long)app_hb_get(APP_HB_CONSOLE),
                  (unsigned long)app_hb_get(APP_HB_PROD_A),
                  (unsigned long)app_hb_get(APP_HB_PROD_B),
+                 (unsigned long)app_hb_get(APP_HB_SAMPLER),
                  (unsigned long)app_log_dropped(),
                  (unsigned long)rx_dropped);
 }
 
 static void console_help(void)
 {
-  app_log_printf("HELP commands: status stack fault wdg log <text> fs <info|ls|format|mount|umount|write|append|read|rm|test|fill|stress> stall <0|1|2> crash reboot\r\n");
+  app_log_printf("HELP commands: status stack fault wdg log <text> fs <info|ls|format|mount|umount|write|append|read|rm|test|fill|stress> acq <info|start|stop|check|selftest> stall <0|1|2> crash reboot\r\n");
 }
 
 static void console_fault_report(void)
@@ -190,6 +193,59 @@ static void console_fault_report(void)
                  (unsigned long)record.xpsr,
                  (unsigned long)record.sp,
                  (unsigned long)record.exc_return);
+}
+
+static void console_acq(const char *arg)
+{
+  while (*arg == ' ')
+  {
+    arg++;
+  }
+
+  if ((*arg == '\0') || (strcmp(arg, "info") == 0))
+  {
+    app_acq_report();
+    return;
+  }
+
+  if (strcmp(arg, "start") == 0)
+  {
+    int rc = app_acq_start();
+    app_log_printf("ACQ start=%s rc=%d\r\n", (rc == 0) ? "ok" : "fail", rc);
+    return;
+  }
+
+  if (strcmp(arg, "stop") == 0)
+  {
+    app_acq_stop();
+    app_log_printf("ACQ stop=ok\r\n");
+    app_acq_report();
+    return;
+  }
+
+  if (strcmp(arg, "check") == 0)
+  {
+    (void)app_acq_check();
+    return;
+  }
+
+  if (strcmp(arg, "selftest") == 0)
+  {
+    int rc = app_acq_start();
+
+    if (rc != 0)
+    {
+      app_log_printf("ACQ SELFTEST FAIL start rc=%d\r\n", rc);
+      return;
+    }
+    tx_thread_sleep(APP_MS_TO_TICKS(1500));
+    app_acq_stop();
+    rc = app_acq_check();
+    app_log_printf("ACQ SELFTEST %s rc=%d\r\n", (rc == 0) ? "PASS" : "FAIL", rc);
+    return;
+  }
+
+  app_log_printf("ERR unknown-acq=%s\r\n", arg);
 }
 
 static void console_fs(const char *arg)
@@ -220,7 +276,14 @@ static void console_fs(const char *arg)
 
   if (strcmp(arg, "format") == 0)
   {
-    int rc = app_fxdisk_format();
+    int rc;
+
+    if (app_acq_running() != 0)
+    {
+      app_log_printf("ERR acq-running stop-capture-first\r\n");
+      return;
+    }
+    rc = app_fxdisk_format();
     app_log_printf("FS format=%s rc=%d\r\n", (rc == 0) ? "ok" : "fail", rc);
     return;
   }
@@ -234,7 +297,14 @@ static void console_fs(const char *arg)
 
   if ((strcmp(arg, "umount") == 0) || (strcmp(arg, "unmount") == 0))
   {
-    int rc = app_fxdisk_unmount();
+    int rc;
+
+    if (app_acq_running() != 0)
+    {
+      app_log_printf("ERR acq-running stop-capture-first\r\n");
+      return;
+    }
+    rc = app_fxdisk_unmount();
     app_log_printf("FS umount=%s rc=%d\r\n", (rc == 0) ? "ok" : "fail", rc);
     return;
   }
@@ -456,6 +526,10 @@ static void console_dispatch(char *line)
   else if (strncmp(line, "log ", 4) == 0)
   {
     app_log_printf("LOG %s\r\n", line + 4);
+  }
+  else if (strncmp(line, "acq", 3) == 0)
+  {
+    console_acq(line + 3);
   }
   else if (strncmp(line, "fs", 2) == 0)
   {
