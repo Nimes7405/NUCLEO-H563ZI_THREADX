@@ -69,27 +69,98 @@ if ((value & ~current) != 0U) { sim_bit_violations++; value &= current; }
 
 ## 采集链路
 
-### 为什么用 EOC 中断而不是 DMA
+### GPDMA 不落内存的根因（已定位）
 
-原计划是 TIM3 触发 ADC + GPDMA 循环搬运。GPDMA 链表配置（对照 ST 官方
-`NUCLEO-H533RE/ADC_MultiChannelSingleConversion` 逐项对齐）能起来，但**数据不落内存**，
-排查过程与证据如下，最终改用 ADC EOC 中断：
+原计划 TIM3 触发 ADC + GPDMA 循环搬运。第一阶段能启动、能计数，但缓冲区内容不变，
+当时先退回 EOC 中断保证功能可用。随后用 `dma test`（纯 mem2mem，不经过 ADC/FileX）
+把问题单独复现并定位。
 
-| 现象 | 观测 |
-| --- | --- |
-| 最初 | `HAL_ADC_Start_DMA` 返回 OK，但 ADC/DMA 错误码均为 `0x04`（`HAL_DMA_ERROR_USE`） |
-| 定位 1 | 通道属性：TZEN 下 GPDMA 通道默认非安全/非特权，而 ADC 的 DR 走安全别名 `0x5202_8040`；补通道属性 `DMA_CHANNEL_PRIV` + `DMA_CHANNEL_SEC` 后 USEF 消失 |
-| 定位 2 | 链表可访问端口：内存侧改到 `PORT1`、链表也放 `PORT1` 后，DMA 不再报错 |
-| 定位 3 | 还要给 TIM3 开时钟（`HAL_TIM_Base_MspInit` 只开了 TIM6），否则无触发、无 DMA 请求 |
-| 剩余问题 | 修复后 DMA 的 `CBR1` 正常递减（10 kHz 触发、HT/TC 中断都来），但缓冲区内容不变：CPU 在 `0x2001_89a0` 读到的是自己写入的图案，DMA 的 `CDAR` 也从该地址递增，安全别名 `0x3001_89a0` 同样读不到。**传输被"计数"了，数据没落地** |
-| 结论 | 未确认根因（怀疑 GPDMA 对 SRAM 页的安全属性/端口可达性）；先改用 EOC 中断保证功能可用 |
+**根因：GPDMA 的安全属性有两层，之前只设了第一层。**
 
-EOC 中断方案：TIM3 10 kHz TRGO 触发 ADC1 常规组，`HAL_ADC_ConvCpltCallback`
-只做"读 DR + 写环形缓冲"，环形缓冲 1024 点；采样线程每 50 ms 取 500 点统计。
-实测 3 s 得 30,500 样本（10 kHz）、`drop=0`、`sampler` 栈 1376/2048。
+| 层级 | 寄存器 | HAL 参数 | 作用 |
+| --- | --- | --- | --- |
+| 通道级 | `GPDMA_SECCFGR` / `PRIVCFGR` | `DMA_CHANNEL_SEC` / `DMA_CHANNEL_PRIV` | 通道本身以什么安全级/特权级发起访问 |
+| 传输级（每个 beat） | `CCR`… 实为通道 `CTR1.SSEC` / `CTR1.DSEC`；链表模式下是节点里的 `SrcSecure` / `DestSecure` | `DMA_CHANNEL_SRC_SEC` / `DMA_CHANNEL_DEST_SEC` | 源/目的**数据拍**是安全访问还是非安全访问 |
 
-**遗留**：更高采样率或更低 CPU 占用仍需 DMA，下一步应先用最小 mem2mem 链表
-传输验证 GPDMA 在本板 Secure 配置下能否写 SRAM，再回到 ADC 路径。
+`dma env` 在本板实测：
+
+```
+DMA ENV sau_ctrl=00000000 sau_type=00000008 allns=0   # SAU 未启用 => 全部安全
+DMA ENV gpdma1 seccfgr=00000000 privcfgr=00000000     # 通道默认非安全 + 非特权
+DMA ENV src=20019200 sram1 sec=1 priv=1               # SRAM 块：安全 + 仅特权可访问
+```
+
+也就是说 SRAM 在 GTZC MPCBB 里是「安全 + 特权」的，而 GPDMA 通道复位后是「非安全 +
+非特权」，且**即使把通道改安全，数据拍仍然是非安全的**。TZSC 直接把这种访问过滤掉：
+通道照常计数、照常产生 HT/TC 中断、**任何错误标志都不置位**，只有数据没了。这与最初
+"计数但不落内存"的现象完全一致；ADC 侧日志出现全 0 样本同理（读安全别名
+`0x5202_8040` 的非安全访问被过滤，读回 0）。
+
+`dma test` 的判定矩阵（32 word mem2mem，`attr` 缩写：P=特权通道 S=安全通道
+SS=安全源 DS=安全目的）：
+
+| # | attr | 缓冲区 | 结果 | 说明 |
+| --- | --- | --- | --- | --- |
+| 00 | `-`（复位默认） | SRAM1 | FAIL mism=32 | 非安全+非特权通道，全部被过滤 |
+| 01 | P | SRAM1 | FAIL | 只加特权不够 |
+| 02 | PS | SRAM1 | FAIL | **通道安全也不够**（数据拍仍非安全）|
+| 03 | PSSD | SRAM1 | **PASS** | 通道安全+特权，源/目拍安全 |
+| 04 | SSD | SRAM1 | FAIL | 缺特权（MPCBB 要求 priv=1）|
+| 05 | PSD | SRAM1 | FAIL | 缺通道级安全 |
+| 06 | PSSD | SRAM1（PORT0/PORT0）| PASS | 端口分配不影响结论 |
+| 07 | PSSD | SRAM2 | PASS | |
+| 08 | PSSD | SRAM3 | PASS | |
+| 09 | PSSD | 安全别名 `0x3000_xxxx` | PASS | 两种别名等价 |
+
+所有失败用例的 `csr=0001`、`err=0000`、`cbr1=0000`：**传输"成功"完成，只是数据被丢弃**。
+这就是为什么当初只看错误码查不出问题。
+
+对应的正确写法（本工程采用，链表模式）：
+
+```c
+/* 通道级 */
+HAL_DMA_ConfigChannelAttributes(&hdma, DMA_CHANNEL_PRIV | DMA_CHANNEL_SEC);
+/* 节点级（H5 HAL 用节点字段表达 SSEC/DSEC） */
+node.SrcSecure  = DMA_CHANNEL_SRC_SEC;
+node.DestSecure = DMA_CHANNEL_DEST_SEC;
+```
+
+ADC DR 走安全别名（`ADC1_S` → `0x5202_8040`），所以源侧必须是安全拍。
+
+### 现在的采集实现
+
+两条路径可在运行时选择，共用同一个 1024 点环形缓冲和窗口逻辑：
+
+- **IRQ 路径**（`acq start irq`）：TIM3 TRGO → ADC1 → EOC 中断里读 DR 入环。
+  简单、CPU 占用随采样率线性上升。
+- **GPDMA 路径**（`acq start dma [hz]`）：单节点链表 + `DMA_LINKEDLIST_CIRCULAR`，
+  ADC 请求 → GPDMA 循环写入 `2 × 512` 半字缓冲。HT/TC 中断只置"半满就绪"位，
+  采样线程把就绪的一半搬进环形缓冲。GPDMA 没有独立循环位，循环靠"尾节点指回首节点"。
+
+`acq info` 会额外打印通道 1 的原始寄存器，便于现场判断：
+
+```
+ACQ running=1 mode=dma rate=50000 file=LOG0001.CSV windows=173 samples=86500     files=2 min=500 max=825 drop=469 dma_ovr=0
+ACQ dma ch1 ccr=00805f01 csr=00000000 cb1=00000434 sar=52028040 dar=20018e0c
+```
+
+`dma_ovr` 是"DMA 半满时上一半还没被取走"的次数；`drop` 是环形缓冲溢出。
+环形缓冲最初 1024 点（一次 feed 最多推进 2 × 512 = 1024 点，必然溢出），
+改成 2048 点后：
+
+| 配置 | 时长 | 结果 |
+| --- | --- | --- |
+| `acq start irq 10000` | 9.2 s | `samples=92000 drop=0` |
+| `acq start dma 50000` | 4.2 s | `samples=211000 drop=0 dma_ovr=0`，写满 4 个日志文件 |
+| `acq start dma 100000` | 3.2 s | `samples=162500 drop=160049 dma_ovr=1`——掉一半 |
+
+100 kHz 时 `dma_ovr` 只多了 1 次，说明 DMA 侧几乎没被饿死，丢失全部来自环形缓冲：
+采样线程既搬数据又同步写文件，单窗口 `fx_media_flush()` 的耗时已经把吞吐压在
+≈50 k 样本/秒。**结论：采样不再是瓶颈，写盘是**；要更高采样率必须先解耦
+"采集线程只入队 / writer 线程落盘"。
+
+`dma test` 会重置 **GPDMA1 通道 0**（只有 mem2mem 用），因此 `acq start dma` 每次启动
+都会重新建立通道 1 的链表与属性——即使中途被 `dma test` 之类操作打断也能自愈。
 
 ### 记录格式与轮转
 
@@ -162,9 +233,9 @@ RAM 上电是 0x00 而不是擦除态 0xFF。模拟后端在第一次初始化�
 
 ## 尚未覆盖
 
-- **DMA 采样**：GPDMA 链表传输在本板上"计数但不落内存"，根因未定（见上节）。
-  之前留下的 `app_acq` DMA 代码已删除，避免带病路径混进固件；后续按
-  "最小 mem2mem 验证 → ADC DMA"的顺序重做。
+- **高采样率下的写盘瓶颈**：50 kHz 时采样已经不吃 CPU，但每 500 样本仍要写一行、
+  每 2 KB 轮转一次，落盘抖动会造成约 1% 的环形缓冲丢弃。要真跑更高采样率必须先改
+  存储策略（批量写 / 更大的窗口 / 二进制记录）。
 - **采集与日志解耦**：当前采样线程自己写文件，写 Flash 期间该线程被占用；
   真实产品应改成"采样线程只入队，独立 writer 线程落盘"。
 - **时间戳**：日志只有窗口序号，没有绝对时间；接 RTC 后应记录起始时间。
@@ -180,8 +251,8 @@ RAM 上电是 0x00 而不是擦除态 0xFF。模拟后端在第一次初始化�
 ## 下一步
 
 1. 有 SPI NOR / SD 卡后，替换 `app_fxdisk.c` 的底层读写为真实驱动，
-   保持 FileX/LevelX 层不变，先跑同一套 `fs` + `acq` 自检。
-2. 用最小 mem2mem 链表传输定位 GPDMA 不落内存的根因，再恢复 ADC DMA 采样，
-   为更高采样率留出 CPU 余量。
+   保持 FileX/LevelX 层不变，先跑同一套 `fs` + `acq` + `dma` 自检。
+2. 采集与落盘解耦（采样线程只入队、独立 writer 线程落盘），把 50 kHz 以上时
+   约 1% 的丢弃消掉。
 3. 加 RTC 时间戳与文件头（起始时间、采样率、通道），让日志能脱离固件解读。
 4. 真实介质上做掉电注入与介质寿命评估。

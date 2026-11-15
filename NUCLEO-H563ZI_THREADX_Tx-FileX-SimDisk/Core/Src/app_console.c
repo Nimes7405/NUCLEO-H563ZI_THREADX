@@ -1,6 +1,7 @@
 #include "app_console.h"
 #include "app_acq.h"
 #include "app_config.h"
+#include "app_dma.h"
 #include "app_fault.h"
 #include "app_fxdisk.h"
 #include "app_log.h"
@@ -25,6 +26,7 @@ static void console_dispatch(char *line);
 static void console_fault_report(void);
 static void console_help(void);
 static void console_acq(const char *arg);
+static void console_dma(const char *arg);
 static void console_fs(const char *arg);
 static void console_stall(const char *arg);
 
@@ -168,7 +170,7 @@ void app_console_status(void)
 
 static void console_help(void)
 {
-  app_log_printf("HELP commands: status stack fault wdg log <text> fs <info|ls|format|mount|umount|write|append|read|rm|test|fill|stress> acq <info|start|stop|check|selftest> stall <0|1|2> crash reboot\r\n");
+  app_log_printf("HELP commands: status stack fault wdg log <text> fs <info|ls|format|mount|umount|write|append|read|rm|test|fill|stress> acq <info|start [dma|irq] [hz]|stop|check|selftest> dma <env|test> stall <0|1|2> crash reboot\r\n");
 }
 
 static void console_fault_report(void)
@@ -208,10 +210,38 @@ static void console_acq(const char *arg)
     return;
   }
 
-  if (strcmp(arg, "start") == 0)
+  if (strncmp(arg, "start", 5) == 0)
   {
-    int rc = app_acq_start();
-    app_log_printf("ACQ start=%s rc=%d\r\n", (rc == 0) ? "ok" : "fail", rc);
+    const char *opt = arg + 5;
+    int use_dma = 0;
+    uint32_t hz = 0U;
+    int rc;
+
+    while (*opt == ' ')
+    {
+      opt++;
+    }
+    if (strncmp(opt, "dma", 3) == 0)
+    {
+      use_dma = 1;
+      opt += 3;
+    }
+    else if (strncmp(opt, "irq", 3) == 0)
+    {
+      opt += 3;
+    }
+    while (*opt == ' ')
+    {
+      opt++;
+    }
+    if (*opt != '\0')
+    {
+      hz = (uint32_t)strtoul(opt, NULL, 10);
+    }
+
+    rc = app_acq_start(use_dma, hz);
+    app_log_printf("ACQ start=%s mode=%s rc=%d\r\n", (rc == 0) ? "ok" : "fail",
+                   (use_dma != 0) ? "dma" : "irq", rc);
     return;
   }
 
@@ -231,7 +261,7 @@ static void console_acq(const char *arg)
 
   if (strcmp(arg, "selftest") == 0)
   {
-    int rc = app_acq_start();
+    int rc = app_acq_start(0, 0U);
 
     if (rc != 0)
     {
@@ -489,6 +519,34 @@ static void console_stall(const char *arg)
   }
 }
 
+static void console_dma(const char *arg)
+{
+  while (*arg == ' ')
+  {
+    arg++;
+  }
+
+  if ((*arg == '\0') || (strcmp(arg, "env") == 0))
+  {
+    app_dma_env_report();
+    return;
+  }
+
+  if (strcmp(arg, "test") == 0)
+  {
+    if (app_acq_running() != 0)
+    {
+      app_log_printf("ERR acq-running stop-capture-first\r\n");
+      return;
+    }
+    int failures = app_dma_mem_selftest();
+    app_log_printf("DMA RESULT %s\r\n", (failures == 0) ? "PASS" : "FAIL");
+    return;
+  }
+
+  app_log_printf("ERR unknown-dma=%s\r\n", arg);
+}
+
 static void console_dispatch(char *line)
 {
   while (*line == ' ')
@@ -534,6 +592,10 @@ static void console_dispatch(char *line)
   else if (strncmp(line, "fs", 2) == 0)
   {
     console_fs(line + 2);
+  }
+  else if (strncmp(line, "dma", 3) == 0)
+  {
+    console_dma(line + 3);
   }
   else if (strncmp(line, "stall", 5) == 0)
   {

@@ -10,7 +10,9 @@
 
 void app_acq_init(void);
 void app_acq_thread_entry(unsigned long thread_input);
-int app_acq_start(void);
+/* use_dma: 0 = ADC end-of-conversion interrupt, 1 = GPDMA circular transfer.
+   hz: 0 keeps the current rate, otherwise 1000..100000 Hz. */
+int app_acq_start(int use_dma, uint32_t hz);
 void app_acq_stop(void);
 int app_acq_running(void);
 void app_acq_report(void);

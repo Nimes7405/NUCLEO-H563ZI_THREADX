@@ -233,10 +233,13 @@ P0 基线（已完成）
   `0x081FE000` 起的 8 KB EDATA 区；
   ③ 若开了"Flash 只读"MPU 分区，编程那一刻要临时关 MPU。详见
   [模板 TIPS §7](./NUCLEO-H563ZI_THREADX-SECURE_TEMPLATE/NUCLEO-H563ZI_THREADX_TIPS.md)。
-- **GPDMA 三条**：① TZEN 下通道默认非安全/非特权，访问安全外设要
-  `DMA_CHANNEL_PRIV + DMA_CHANNEL_SEC`，否则报 USEF；② 内存侧端口用 PORT1、
-  链表也放 PORT1；③ 但这三条都满足后本板仍出现"计数但不落内存"，所以高采样率
-  前必须先用最小 mem2mem 链表验证 GPDMA 能写 SRAM。详见
+- **GPDMA 四条（"计数但不落内存"已定位）**：① TZEN 下通道默认非安全/非特权，
+  先补 `DMA_CHANNEL_PRIV + DMA_CHANNEL_SEC`，否则报 USEF；② **光有 ① 仍不落数据**：
+  每个数据拍的 `SSEC`/`DSEC`（链表模式下是节点里的 `SrcSecure`/`DestSecure`）也必须
+  是安全，`DMA_CHANNEL_SRC_SEC`/`DEST_SEC` 少一个都会被 GTZC 静默过滤——通道照样计数、
+  照样进 TC 中断、**错误标志不置位**，只有数据消失；③ 本板 SRAM 在 MPCBB 里是
+  "安全 + 特权"，所以通道特权位也不能少；④ 端口分配（PORT0/PORT1）、SRAM 体、
+  0x2xxx/0x3xxx 别名都不影响结论。定位工具：`dma env` / `dma test`。详见
   [SimDisk 复盘](./NUCLEO-H563ZI_THREADX_Tx-FileX-SimDisk/report.md)。
 - **FileX/LevelX 三条**：① FileX 没有 cortex_m33 port，用 `ports/generic/inc`；
   ② `fx_system_initialize()` 会建定时器，必须在 `tx_application_define()` 里调用；
@@ -329,10 +332,11 @@ P0 基线（已完成）
 2. **已完成**：路线 1 的 P2 控制环 —— 见 [`Tx-Control-Node`](./NUCLEO-H563ZI_THREADX_Tx-Control-Node/README.md)。TIM1 20 kHz、控制 10 kHz、抖动 spread 0.1–3.2 µs、`stall 3` 触发 IWDG。
 3. **已完成**：路线 1 的 P3-lite 容错 —— 静态 MPU（12 regions / 5 guards）、guard→MemManage 归因、连续 3 次故障安全模式、`stall 4` 触发 WWDG。
 4. **已完成**：P4 量产化主体 —— `-O2` 七组自检、`cal` 参数校准与片内 Flash 掉电保存、`release` profile + `release_check.sh`。
-5. **已完成**：路线 2 的文件系统 + 采集链路 —— [`Tx-FileX-SimDisk`](./NUCLEO-H563ZI_THREADX_Tx-FileX-SimDisk/README.md) 用 RAM 模拟 NOR 跑通 FileX + LevelX（FAT、扇区映射、块回收、磨损均衡），并完成 TIM3→ADC1→环形缓冲→CSV 落盘→回读校验，五组自检全 PASS。
-6. **下一步**：路线 1 按需要把长跑加长到 8/24 h；路线 2 先定位 GPDMA 不落内存的根因以恢复 DMA 采样，再接真实介质，并给日志加 RTC 时间戳与文件头。
-7. **已完成**：P4 七组 `selfcheck all` 全 PASS；guard/BusFault/IWDG/WWDG 重复注入 35 次全部通过。**片内 Flash 写入中掉电注入已决定暂不执行**（无可编程电源），后续有设备或产品强制要求时再做，届时先实现双页轮换。
-8. **贯穿始终**：每加一个外设或中断，先过 §5.1 检查清单（模式宏、端口完整性、时基分工、NVIC、栈大小），再谈功能。
+5. **已完成**：路线 2 的文件系统 + 采集链路 —— [`Tx-FileX-SimDisk`](./NUCLEO-H563ZI_THREADX_Tx-FileX-SimDisk/README.md) 用 RAM 模拟 NOR 跑通 FileX + LevelX（FAT、扇区映射、块回收、磨损均衡），并完成 TIM3→ADC1→环形缓冲→CSV 落盘→回读校验，六组自检全 PASS。
+6. **已完成**：GPDMA 采样的"计数但不落内存"根因 —— 传输级安全属性（`SSEC`/`DSEC`）没设，GTZC 静默丢拍。现在 `acq start dma [hz]` 用单节点循环链表跑 ADC→GPDMA，实测 **50 kHz 零丢弃**；100 kHz 时瓶颈变成写盘（采样线程同步 `fx_media_flush`），下一步是解耦采集与落盘。
+7. **下一步**：路线 1 按需要把长跑加长到 8/24 h；路线 2 先做"采集入队 / writer 落盘"解耦以突破 50 kHz，再接真实介质，并给日志加 RTC 时间戳与文件头。
+8. **已完成**：P4 七组 `selfcheck all` 全 PASS；guard/BusFault/IWDG/WWDG 重复注入 35 次全部通过。**片内 Flash 写入中掉电注入已决定暂不执行**（无可编程电源），后续有设备或产品强制要求时再做，届时先实现双页轮换。
+9. **贯穿始终**：每加一个外设或中断，先过 §5.1 检查清单（模式宏、端口完整性、时基分工、NVIC、栈大小），再谈功能。
 
 ---
 

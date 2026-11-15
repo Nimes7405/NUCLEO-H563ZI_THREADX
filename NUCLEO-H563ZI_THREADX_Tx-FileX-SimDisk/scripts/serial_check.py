@@ -220,6 +220,60 @@ def mode_fs(port):
     return ok
 
 
+ACQ_INFO = (
+    r"ACQ running=(\d) mode=(\w+) rate=(\d+) file=(\S+) windows=(\d+) samples=(\d+) "
+    r"files=(\d+) min=(\d+) max=(\d+) drop=(\d+) dma_ovr=(\d+)"
+)
+
+
+def acq_capture(port, label, start_cmd, seconds, min_windows, max_drop_ratio):
+    """Start a capture, let it run, stop it and assert the counters."""
+    port.clear()
+    port.send(start_cmd)
+    ok = check(port, f"{label}-start", port.wait_for("ACQ start=ok", 5.0), "ACQ start=ok")
+
+    port.read_for(seconds)
+
+    port.clear()
+    port.send("acq stop")
+    ok &= check(port, f"{label}-stop", port.wait_for("ACQ stop=ok", 5.0), "ACQ stop=ok")
+
+    port.clear()
+    port.send("acq info")
+    port.read_for(0.6)
+    text = port.text()
+    match = re.search(ACQ_INFO, text)
+    ok &= check(port, f"{label}-stats", match is not None, "ACQ running=... line")
+    if not match:
+        return ok
+
+    mode = match.group(2)
+    windows = int(match.group(5))
+    samples = int(match.group(6))
+    files = int(match.group(7))
+    low = int(match.group(8))
+    high = int(match.group(9))
+    drops = int(match.group(10))
+    dma_ovr = int(match.group(11))
+
+    ok &= check(port, f"{label}-windows", windows >= min_windows,
+                f"windows>={min_windows} (got {windows})")
+    ok &= check(port, f"{label}-samples", samples == windows * 500,
+                "samples == windows*500")
+    ok &= check(port, f"{label}-no-overrun", dma_ovr == 0, f"dma_ovr=0 (got {dma_ovr})")
+    ok &= check(port, f"{label}-drops", drops <= max(windows * 500 * max_drop_ratio, 1),
+                f"drop<={max_drop_ratio:.0%} of samples (got {drops})")
+    ok &= check(port, f"{label}-adc-range", (high <= 4095) and (high >= low),
+                "0 <= min <= max <= 4095")
+    ok &= check(port, f"{label}-rotated", files >= 2, f"files>=2 (got {files})")
+    ok &= check(port, f"{label}-mode", mode in ("irq", "dma"), f"mode in irq/dma (got {mode})")
+
+    port.clear()
+    port.send("acq check")
+    ok &= check(port, f"{label}-check", port.wait_for("ACQ CHECK PASS", 8.0), "ACQ CHECK PASS")
+    return ok
+
+
 def mode_acq(port):
     port.drain_quiet()
 
@@ -228,39 +282,8 @@ def mode_acq(port):
     ok = check(port, "acq-fresh-volume", port.wait_for("FS format=ok rc=0", 15.0),
                "FS format=ok rc=0")
 
-    port.clear()
-    port.send("acq start")
-    ok &= check(port, "acq-start", port.wait_for("ACQ start=ok rc=0", 5.0),
-                "ACQ start=ok rc=0")
-
-    port.read_for(9.0)
-
-    port.clear()
-    port.send("acq stop")
-    ok &= check(port, "acq-stop", port.wait_for("ACQ stop=ok", 5.0), "ACQ stop=ok")
-
-    port.clear()
-    port.send("acq info")
-    ok &= check(port, "acq-stopped", port.wait_for("ACQ running=0", 5.0), "ACQ running=0")
-    port.read_for(0.6)
-    text = port.text()
-    match = re.search(r"ACQ running=0 file=(\S+) windows=(\d+) samples=(\d+) "
-                      r"files=(\d+) min=(\d+) max=(\d+) drop=(\d+)", text)
-    ok &= check(port, "acq-stats", match is not None, "ACQ running=0 ...")
-    if match:
-        windows = int(match.group(2))
-        samples = int(match.group(3))
-        files = int(match.group(4))
-        low = int(match.group(5))
-        high = int(match.group(6))
-        drops = int(match.group(7))
-        ok &= check(port, "acq-windows", windows >= 120, f"windows>={120} (got {windows})")
-        ok &= check(port, "acq-rate", abs(samples - windows * 500) == 0,
-                    "samples == windows*500")
-        ok &= check(port, "acq-no-drop", drops == 0, f"drop=0 (got {drops})")
-        ok &= check(port, "acq-adc-range", (high <= 4095) and (high >= low),
-                    "0 <= min <= max <= 4095")
-        ok &= check(port, "acq-rotated", files >= 2, f"files>=2 (got {files})")
+    # Interrupt-driven baseline: one sample per ADC end-of-conversion.
+    ok &= acq_capture(port, "acq-irq", "acq start irq 10000", 9.0, 120, 0.0)
 
     port.clear()
     port.send("fs ls")
@@ -268,12 +291,52 @@ def mode_acq(port):
     ok &= check(port, "acq-file-1", port.wait_for("FS f=LOG0001.CSV", 5.0), "FS f=LOG0001.CSV")
 
     port.clear()
-    port.send("acq check")
-    ok &= check(port, "acq-check", port.wait_for("ACQ CHECK PASS", 8.0), "ACQ CHECK PASS")
+    port.send("fs format")
+    ok &= check(port, "acq-cleanup", port.wait_for("FS format=ok rc=0", 15.0),
+                "FS format=ok rc=0")
+
+    # GPDMA path at 5x the interrupt rate.
+    ok &= acq_capture(port, "acq-dma", "acq start dma 50000", 4.0, 120, 0.02)
 
     port.clear()
     port.send("fs format")
-    ok &= check(port, "acq-cleanup", port.wait_for("FS format=ok rc=0", 15.0),
+    ok &= check(port, "acq-dma-cleanup", port.wait_for("FS format=ok rc=0", 15.0),
+                "FS format=ok rc=0")
+    return ok
+
+
+def mode_dma(port):
+    port.drain_quiet()
+
+    port.clear()
+    port.send("dma env")
+    ok = check(port, "dma-env-sau", port.wait_for("DMA ENV sau_ctrl=", 5.0), "DMA ENV sau_ctrl=")
+    ok &= check(port, "dma-env-mpcbb", port.wait_for("DMA ENV src=", 3.0), "DMA ENV src=")
+
+    port.clear()
+    port.send("dma test")
+    ok &= check(port, "dma-selftest", port.wait_for("DMA MEMTEST PASS", 10.0),
+                "DMA MEMTEST PASS")
+    port.read_for(0.4)
+    text = port.text()
+    # Fully attributed transfer must move data; channel-level attributes alone
+    # must not (this is the bug the matrix documents).
+    ok &= check(port, "dma-case-secure", "attr=PSSD port=p0/p1 buf=sram1" in text and
+                "mism=00" in text, "PSSD sram1 mism=00")
+    ok &= check(port, "dma-case-ps-blocked", "attr=PS port=p0/p1" in text,
+                "attr=PS port=p0/p1")
+    ok &= check(port, "dma-result", port.wait_for("DMA RESULT PASS", 3.0), "DMA RESULT PASS")
+
+    # The acquisition path must survive the controller being poked.
+    port.clear()
+    port.send("fs format")
+    ok &= check(port, "dma-volume", port.wait_for("FS format=ok rc=0", 15.0),
+                "FS format=ok rc=0")
+    ok &= acq_capture(port, "dma-after-test", "acq start dma 50000", 3.0, 80, 0.02)
+
+    port.clear()
+    port.send("fs format")
+    ok &= check(port, "dma-cleanup", port.wait_for("FS format=ok rc=0", 15.0),
                 "FS format=ok rc=0")
     return ok
 
@@ -282,7 +345,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", default="/dev/ttyACM0")
     parser.add_argument("--baud", type=int, default=115200)
-    parser.add_argument("--mode", choices=["basic", "fs", "acq", "watchdog", "fault"], default="basic")
+    parser.add_argument("--mode", choices=["basic", "fs", "acq", "dma", "watchdog", "fault"],
+                        default="basic")
     args = parser.parse_args()
 
     port = Port(args.port, args.baud)
@@ -295,6 +359,8 @@ def main():
             ok = mode_fs(port)
         elif args.mode == "acq":
             ok = mode_acq(port)
+        elif args.mode == "dma":
+            ok = mode_dma(port)
         elif args.mode == "watchdog":
             ok = mode_watchdog(port)
         else:

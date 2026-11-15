@@ -7,8 +7,9 @@
 
 对应 [Application Note](../Application_note.md) 路线 2（数据记录仪）的
 **软件栈验证阶段**：先把 FileX + LevelX 和"采集 → 落盘 → 回读校验"这条链路
-跑通，再谈真实介质。当前链路：TIM3 10 kHz 触发 ADC1 → 环形缓冲 →
-50 ms 窗口统计 → CSV 追加 → 2 KB 轮转 → `acq check` 逐行回读校验。
+跑通，再谈真实介质。当前链路：TIM3 触发 ADC1 → **GPDMA 循环缓冲或 EOC 中断**
+→ 环形缓冲 → 窗口统计 → CSV 追加 → 2 KB 轮转 → `acq check` 逐行回读校验。
+默认 10 kHz，DMA 模式实测 50 kHz 零丢弃（`acq start dma 50000`）；再往上瓶颈是写盘而不是采样。
 
 ## 为什么要模拟盘
 
@@ -44,7 +45,7 @@
 
 | 项目 | 结果 |
 | --- | --- |
-| 构建 | `text 146,844 / data 2,364 / bss 99,408`，`.bin` 149,216 B（模拟 NOR 占 64 KiB bss） |
+| 构建 | `text 218,492 / data 2,380 / bss 109,384`，`.bin` 220,876 B（模拟 NOR 占 64 KiB bss） |
 | 启动 | `FSD mount=formatted sectors=120 reason=1` → `READY tx-filex-simdisk 1.0.0` |
 | 挂载信息 | `FSD mounted=1 media=SIMDISK sectors=120 sector_bytes=512 free_bytes=58368` |
 | 写读闭环 | `fs write DEMO.TXT hello-simdisk` → 回读 `text=hello-simdisk`；`append` 后 `hello-simdisk+more` |
@@ -54,11 +55,15 @@
 | 重复改写 | `fs stress 60`：127 次扇区写、123 次块分配、93 个作废扇区、2 次块擦除，`violations=0`，校验全通过 |
 | 卸载/重挂 | `fs umount` → `fs mount` 后数据仍在（`FS f=FILL.BIN`） |
 | 重新格式化 | `fs format` → `FS format=ok rc=0`，`fs count=0` |
-| 采集 → 落盘 | `acq start` 3 s：`windows=61 samples=30500 drop=0`（≈10 kHz），日志行 `0,467,810,519,500` |
-| 文件轮转 | 9 s 采集写入 `LOG0000.CSV`(2053 B) + `LOG0001.CSV`(1617 B)，`files=2` |
-| 回读校验 | `acq check` → `ACQ CHECK PASS lines=77 samples=38500 min=325 max=545` |
-| 线程栈 | `sampler=1376/2048`、`console=1480/4096`、`monitor=1008/2048` |
-| 一键自检 | `./scripts/selfcheck.sh all`：`basic` 9、`fs` 19、`acq` 14、`watchdog` 4、`fault` 5 全部 PASS |
+| 采集（中断） | `acq start irq 10000` 9.2 s：`windows=184 samples=92000 drop=0` |
+| 采集（DMA） | `acq start dma` 3.2 s：`windows=64 samples=32000 drop=0 dma_ovr=0` |
+| 高采样率 | `acq start dma 50000` 4.2 s：`windows=422 samples=211000 drop=0 dma_ovr=0`，5 倍速率零丢弃 |
+| 文件轮转 | 50 kHz 采集 4.2 s 写满 `LOG0000..LOG0003.CSV`（各 2 KB），`files=4` |
+| 写盘瓶颈 | `acq start dma 100000` 3.2 s：只落下 `samples=162500`、`drop=160049`，采样线程自己写盘已跟不上——下一步要解耦采集与落盘 |
+| 回读校验 | `acq check` → `ACQ CHECK PASS lines=81 samples=40500 min=299 max=528` |
+| GPDMA 诊断 | `dma test` 10 个用例：只有「安全通道 + 特权 + 安全源/目拍」落地，`DMA MEMTEST PASS` |
+| 线程栈 | `sampler=1400/2048`、`console=1364/4096`、`monitor=1008/2048` |
+| 一键自检 | `./scripts/selfcheck.sh all`：`basic` 10、`fs` 19、`acq` 27、`dma` 19、`watchdog` 4、`fault` 5 全部 PASS |
 
 ## 串口命令
 
@@ -79,10 +84,13 @@ USART3（ST-LINK 虚拟串口，PD8/PD9，115200 8N1）。可靠性层命令
 | `fs fill <1..48>` | 写入 N KiB 伪随机图案并逐字节校验，触发多块分配与擦除 |
 | `fs stress <1..500>` | 重复"覆盖写 + 校验"N 次，驱动 LevelX 块回收与磨损均衡 |
 | `fs format` / `fs mount` / `fs umount` | 重新格式化 / 挂载 / 卸载（采集中拒绝执行） |
-| `acq start` / `acq stop` | 开始/停止采集并写日志文件 |
-| `acq info` | 运行状态、当前文件、窗口数、样本数、文件数、min/max、环形缓冲丢弃 |
+| `acq start [dma\|irq] [hz]` | 开始采集：`irq`=EOC 中断（默认），`dma`=GPDMA 循环；`hz` 1000..100000 |
+| `acq stop` | 停止采集并关闭日志文件 |
+| `acq info` | 运行状态、模式、采样率、窗口数、样本数、文件数、min/max、`drop`、`dma_ovr`，DMA 模式下附通道 1 寄存器 |
 | `acq check` | 回读最新日志并逐行校验，输出 `ACQ CHECK PASS/FAIL` |
 | `acq selftest` | 采集 1.5 s → 停止 → 校验，一条命令验证整条链路 |
+| `dma env` | 打印 SAU/GTZC MPCBB 的安全与特权归属、GPDMA1 通道属性 |
+| `dma test` | 10 个 mem2mem 用例矩阵（属性/端口/存储体/别名），输出 `DMA MEMTEST PASS/FAIL` |
 
 ## 构建与烧写
 
@@ -105,10 +113,11 @@ ARM GNU 工具链和 OpenOCD。Makefile 引入：
 ```sh
 ./scripts/selfcheck.sh basic     # 构建 + 符号 + 烧写 + 状态/栈/故障/日志
 ./scripts/selfcheck.sh fs        # 文件系统 19 项断言
-./scripts/selfcheck.sh acq       # 采集→落盘→回读 14 项断言
+./scripts/selfcheck.sh acq       # 中断 + DMA 两种采集→落盘→回读 27 项断言
+./scripts/selfcheck.sh dma       # GPDMA 属性矩阵 + 测试后采集中断不被破坏 19 项断言
 ./scripts/selfcheck.sh watchdog  # 线程卡死 → IWDG 复位
 ./scripts/selfcheck.sh fault     # BusFault 记录与重启报告
-./scripts/selfcheck.sh all       # 五组顺序执行
+./scripts/selfcheck.sh all       # 六组顺序执行
 ```
 
 可用 `PORT=/dev/ttyACM0` 覆盖串口。
