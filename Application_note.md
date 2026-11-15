@@ -333,10 +333,11 @@ P0 基线（已完成）
 3. **已完成**：路线 1 的 P3-lite 容错 —— 静态 MPU（12 regions / 5 guards）、guard→MemManage 归因、连续 3 次故障安全模式、`stall 4` 触发 WWDG。
 4. **已完成**：P4 量产化主体 —— `-O2` 七组自检、`cal` 参数校准与片内 Flash 掉电保存、`release` profile + `release_check.sh`。
 5. **已完成**：路线 2 的文件系统 + 采集链路 —— [`Tx-FileX-SimDisk`](./NUCLEO-H563ZI_THREADX_Tx-FileX-SimDisk/README.md) 用 RAM 模拟 NOR 跑通 FileX + LevelX（FAT、扇区映射、块回收、磨损均衡），并完成 TIM3→ADC1→环形缓冲→CSV 落盘→回读校验，六组自检全 PASS。
-6. **已完成**：GPDMA 采样的"计数但不落内存"根因 —— 传输级安全属性（`SSEC`/`DSEC`）没设，GTZC 静默丢拍。现在 `acq start dma [hz]` 用单节点循环链表跑 ADC→GPDMA，实测 **50 kHz 零丢弃**；100 kHz 时瓶颈变成写盘（采样线程同步 `fx_media_flush`），下一步是解耦采集与落盘。
-7. **下一步**：路线 1 按需要把长跑加长到 8/24 h；路线 2 先做"采集入队 / writer 落盘"解耦以突破 50 kHz，再接真实介质，并给日志加 RTC 时间戳与文件头。
-8. **已完成**：P4 七组 `selfcheck all` 全 PASS；guard/BusFault/IWDG/WWDG 重复注入 35 次全部通过。**片内 Flash 写入中掉电注入已决定暂不执行**（无可编程电源），后续有设备或产品强制要求时再做，届时先实现双页轮换。
-9. **贯穿始终**：每加一个外设或中断，先过 §5.1 检查清单（模式宏、端口完整性、时基分工、NVIC、栈大小），再谈功能。
+6. **已完成**：GPDMA 采样的"计数但不落内存"根因 —— 传输级安全属性（`SSEC`/`DSEC`）没设，GTZC 静默丢拍。现在 `acq start dma [hz]` 用单节点循环链表跑 ADC→GPDMA。
+7. **已完成**：采集/落盘解耦 —— `sampler` 线程只统计并入 32 深队列，独立 `writer` 线程每 50 ms 批量写出、一批只 flush 一次；新增 FileX 介质互斥量。实测 **100 kHz、4.2 s、422,000 样本、零丢样**，flush 次数降到 1/10。
+8. **下一步**：路线 1 按需要把长跑加长到 8/24 h；路线 2 先清掉 100 kHz 下的残余 `dma_ovr`（0.36%，来自调度延迟），再接真实介质，并给日志加 RTC 时间戳与文件头。
+9. **已完成**：P4 七组 `selfcheck all` 全 PASS；guard/BusFault/IWDG/WWDG 重复注入 35 次全部通过。**片内 Flash 写入中掉电注入已决定暂不执行**（无可编程电源），后续有设备或产品强制要求时再做，届时先实现双页轮换。
+10. **贯穿始终**：每加一个外设或中断，先过 §5.1 检查清单（模式宏、端口完整性、时基分工、NVIC、栈大小），再谈功能。
 
 ---
 

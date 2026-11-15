@@ -16,6 +16,7 @@
 #define APP_PRIO_PROD_A         10U
 #define APP_PRIO_PROD_B         11U
 #define APP_PRIO_SAMPLER        5U
+#define APP_PRIO_WRITER         6U
 #define APP_PRIO_LOGGER         20U
 
 #define APP_STACK_MONITOR       2048U
@@ -24,6 +25,7 @@
 #define APP_STACK_SAMPLER       2048U
 #define APP_STACK_PROD_A        2048U
 #define APP_STACK_PROD_B        2048U
+#define APP_STACK_WRITER        3072U
 
 #define APP_LOG_RING_SIZE       4096U
 #define APP_CON_RX_SIZE         256U
@@ -44,6 +46,7 @@ typedef enum
   APP_HB_PROD_A,
   APP_HB_PROD_B,
   APP_HB_SAMPLER,
+  APP_HB_WRITER,
   APP_HB_COUNT
 } app_hb_id_t;
 

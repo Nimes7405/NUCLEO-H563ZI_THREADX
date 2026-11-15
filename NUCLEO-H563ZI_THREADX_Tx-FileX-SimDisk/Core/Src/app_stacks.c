@@ -20,6 +20,7 @@ static app_stack_desc_t stacks[APP_STK_COUNT] = {
     {NULL, 0U, "prod_a"},
     {NULL, 0U, "prod_b"},
     {NULL, 0U, "sampler"},
+    {NULL, 0U, "writer"},
 };
 
 void app_stacks_bind(app_stack_id_t id, void *base, uint32_t size)

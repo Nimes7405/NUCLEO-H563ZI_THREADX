@@ -278,7 +278,9 @@ static void console_acq(const char *arg)
   app_log_printf("ERR unknown-acq=%s\r\n", arg);
 }
 
-static void console_fs(const char *arg)
+/* Runs with the media lock held: the acquisition writer thread logs on the
+   same FileX medium. */
+static void console_fs_locked(const char *arg)
 {
   static char name[APP_CON_FS_NAME_MAX];
   static char data[APP_CON_FS_DATA_MAX];
@@ -517,6 +519,17 @@ static void console_stall(const char *arg)
   {
     app_log_printf("ERR stall index must be 0, 1 or 2\r\n");
   }
+}
+
+static void console_fs(const char *arg)
+{
+  if (app_fxdisk_lock() != 0)
+  {
+    app_log_printf("ERR fs-busy\r\n");
+    return;
+  }
+  console_fs_locked(arg);
+  (void)app_fxdisk_unlock();
 }
 
 static void console_dma(const char *arg)

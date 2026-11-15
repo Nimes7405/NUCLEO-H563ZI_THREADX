@@ -222,11 +222,11 @@ def mode_fs(port):
 
 ACQ_INFO = (
     r"ACQ running=(\d) mode=(\w+) rate=(\d+) file=(\S+) windows=(\d+) samples=(\d+) "
-    r"files=(\d+) min=(\d+) max=(\d+) drop=(\d+) dma_ovr=(\d+)"
+    r"files=(\d+) min=(\d+) max=(\d+) drop=(\d+) dma_ovr=(\d+) qdrop=(\d+) flush=(\d+)"
 )
 
 
-def acq_capture(port, label, start_cmd, seconds, min_windows, max_drop_ratio):
+def acq_capture(port, label, start_cmd, seconds, min_windows, max_drop_ratio, max_ovr=0):
     """Start a capture, let it run, stop it and assert the counters."""
     port.clear()
     port.send(start_cmd)
@@ -255,12 +255,15 @@ def acq_capture(port, label, start_cmd, seconds, min_windows, max_drop_ratio):
     high = int(match.group(9))
     drops = int(match.group(10))
     dma_ovr = int(match.group(11))
+    q_drops = int(match.group(12))
 
     ok &= check(port, f"{label}-windows", windows >= min_windows,
                 f"windows>={min_windows} (got {windows})")
     ok &= check(port, f"{label}-samples", samples == windows * 500,
                 "samples == windows*500")
-    ok &= check(port, f"{label}-no-overrun", dma_ovr == 0, f"dma_ovr=0 (got {dma_ovr})")
+    ok &= check(port, f"{label}-no-overrun", dma_ovr <= max_ovr,
+                f"dma_ovr<={max_ovr} (got {dma_ovr})")
+    ok &= check(port, f"{label}-no-queue-drop", q_drops == 0, f"qdrop=0 (got {q_drops})")
     ok &= check(port, f"{label}-drops", drops <= max(windows * 500 * max_drop_ratio, 1),
                 f"drop<={max_drop_ratio:.0%} of samples (got {drops})")
     ok &= check(port, f"{label}-adc-range", (high <= 4095) and (high >= low),
@@ -296,11 +299,20 @@ def mode_acq(port):
                 "FS format=ok rc=0")
 
     # GPDMA path at 5x the interrupt rate.
-    ok &= acq_capture(port, "acq-dma", "acq start dma 50000", 4.0, 120, 0.02)
+    ok &= acq_capture(port, "acq-dma", "acq start dma 50000", 4.0, 120, 0.0)
 
     port.clear()
     port.send("fs format")
     ok &= check(port, "acq-dma-cleanup", port.wait_for("FS format=ok rc=0", 15.0),
+                "FS format=ok rc=0")
+
+    # 10x the interrupt rate: only possible because the sampler no longer
+    # writes; a couple of DMA halves may still be lost to scheduler latency.
+    ok &= acq_capture(port, "acq-100k", "acq start dma 100000", 4.0, 500, 0.01, 16)
+
+    port.clear()
+    port.send("fs format")
+    ok &= check(port, "acq-100k-cleanup", port.wait_for("FS format=ok rc=0", 15.0),
                 "FS format=ok rc=0")
     return ok
 

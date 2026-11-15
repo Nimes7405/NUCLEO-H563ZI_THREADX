@@ -1,8 +1,10 @@
 #include "app_fxdisk.h"
 #include "app_log.h"
+#include "main.h"
 
 #include "fx_api.h"
 #include "lx_api.h"
+#include "tx_api.h"
 
 #include <string.h>
 
@@ -31,6 +33,11 @@ static LX_NOR_FLASH nor_flash;
 static FX_MEDIA sim_media;
 static UCHAR media_memory[1024];
 static UINT disk_mounted;
+
+/* Guards the FileX media against concurrent use: the acquisition writer thread
+   logs while the console thread may run `fs` commands. */
+static TX_MUTEX media_mutex;
+static UINT media_mutex_ready;
 
 static UINT sim_nor_read(ULONG *flash_address, ULONG *destination, ULONG words);
 static UINT sim_nor_write(ULONG *flash_address, ULONG *source, ULONG words);
@@ -316,6 +323,30 @@ void app_fxdisk_system_init(void)
 {
   /* Creates the FileX system timer; must run in kernel context. */
   fx_system_initialize();
+
+  if (tx_mutex_create(&media_mutex, "fxdisk", TX_INHERIT) != TX_SUCCESS)
+  {
+    Error_Handler();
+  }
+  media_mutex_ready = 1U;
+}
+
+int app_fxdisk_lock(void)
+{
+  if (media_mutex_ready == 0U)
+  {
+    return -1;
+  }
+  return (tx_mutex_get(&media_mutex, TX_WAIT_FOREVER) == TX_SUCCESS) ? 0 : -1;
+}
+
+int app_fxdisk_unlock(void)
+{
+  if (media_mutex_ready == 0U)
+  {
+    return -1;
+  }
+  return (tx_mutex_put(&media_mutex) == TX_SUCCESS) ? 0 : -1;
 }
 
 void app_fxdisk_init(void)
@@ -632,6 +663,17 @@ int app_fxdisk_log_close(void)
   (void)fx_media_flush(&sim_media);
   log_file_open = 0U;
   return 0;
+}
+
+/* Push cached sectors to the medium without closing the file, so a long-lived
+   log handle can flush in batches instead of once per line. */
+int app_fxdisk_log_flush(void)
+{
+  if (log_file_open == 0U)
+  {
+    return -1;
+  }
+  return (fx_media_flush(&sim_media) == FX_SUCCESS) ? 0 : -2;
 }
 
 int app_fxdisk_log_size(uint32_t *size)

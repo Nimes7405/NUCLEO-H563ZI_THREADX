@@ -27,6 +27,12 @@
 #define ACQ_MODE_IRQ        0U
 #define ACQ_MODE_DMA        1U
 
+/* The sampler only produces window records; a separate thread owns the log
+   file. Batching 50 ms of records costs one `fx_media_flush()` per batch
+   instead of one per line, which is what caps the writing throughput. */
+#define ACQ_WRITE_PERIOD_TICKS  5U
+#define ACQ_QUEUE_DEPTH         32U
+
 static ADC_HandleTypeDef hadc1;
 static TIM_HandleTypeDef htim3;
 static DMA_HandleTypeDef hdma_adc1;
@@ -56,6 +62,20 @@ static char acq_current[ACQ_NAME_LEN];
 
 typedef struct
 {
+  uint32_t index;
+  uint32_t min;
+  uint32_t max;
+  uint32_t avg;
+  uint32_t count;
+} acq_record_t;
+
+static TX_QUEUE acq_queue;
+static ULONG acq_queue_mem[ACQ_QUEUE_DEPTH * (sizeof(acq_record_t) / sizeof(ULONG))];
+static volatile uint32_t acq_windows_dropped;
+static volatile uint32_t acq_flush_batches;
+
+typedef struct
+{
   char line[ACQ_LINE_MAX];
   uint32_t used;
   uint32_t lines;
@@ -71,6 +91,18 @@ static void acq_process_window(void);
 static int acq_tim_config(uint32_t hz);
 static int acq_dma_setup(void);
 static void acq_dma_feed_ring(void);
+static int acq_write_record(const acq_record_t *rec);
+static void acq_drain_and_close(void);
+
+/* Kernel-context init: ThreadX objects cannot be created before tx_kernel_enter. */
+void app_acq_system_init(void)
+{
+  if (tx_queue_create(&acq_queue, "acq-q", sizeof(acq_record_t) / sizeof(ULONG),
+                      acq_queue_mem, sizeof(acq_queue_mem)) != TX_SUCCESS)
+  {
+    Error_Handler();
+  }
+}
 
 void app_acq_init(void)
 {
@@ -384,6 +416,8 @@ int app_acq_start(int use_dma, uint32_t hz)
   acq_sum = 0U;
   acq_dma_ready = 0U;
   acq_dma_overruns = 0U;
+  acq_windows_dropped = 0U;
+  acq_flush_batches = 0U;
 
   if ((hz != 0U) && (hz != acq_rate_hz))
   {
@@ -393,10 +427,24 @@ int app_acq_start(int use_dma, uint32_t hz)
     }
   }
 
-  if (acq_open_file() != 0)
+  {
+    /* Drop anything left over from a previous session. */
+    acq_record_t stale;
+    while (tx_queue_receive(&acq_queue, &stale, TX_NO_WAIT) == TX_SUCCESS)
+    {
+    }
+  }
+
+  if (app_fxdisk_lock() != 0)
   {
     return -3;
   }
+  if (acq_open_file() != 0)
+  {
+    (void)app_fxdisk_unlock();
+    return -3;
+  }
+  (void)app_fxdisk_unlock();
 
   acq_mode = (use_dma != 0) ? ACQ_MODE_DMA : ACQ_MODE_IRQ;
 
@@ -407,7 +455,9 @@ int app_acq_start(int use_dma, uint32_t hz)
     if (acq_dma_setup() != 0)
     {
       acq_mode = ACQ_MODE_IRQ;
+      (void)app_fxdisk_lock();
       (void)app_fxdisk_log_close();
+      (void)app_fxdisk_unlock();
       return -7;
     }
 
@@ -415,13 +465,17 @@ int app_acq_start(int use_dma, uint32_t hz)
                           2U * ACQ_DMA_HALF) != HAL_OK)
     {
       acq_mode = ACQ_MODE_IRQ;
+      (void)app_fxdisk_lock();
       (void)app_fxdisk_log_close();
+      (void)app_fxdisk_unlock();
       return -4;
     }
   }
   else if (HAL_ADC_Start_IT(&hadc1) != HAL_OK)
   {
+    (void)app_fxdisk_lock();
     (void)app_fxdisk_log_close();
+    (void)app_fxdisk_unlock();
     return -4;
   }
 
@@ -435,7 +489,9 @@ int app_acq_start(int use_dma, uint32_t hz)
     {
       (void)HAL_ADC_Stop_IT(&hadc1);
     }
+    (void)app_fxdisk_lock();
     (void)app_fxdisk_log_close();
+    (void)app_fxdisk_unlock();
     return -5;
   }
 
@@ -450,6 +506,7 @@ void app_acq_stop(void)
     return;
   }
 
+  acq_running = 0U;
   (void)HAL_TIM_Base_Stop(&htim3);
   if (acq_mode == ACQ_MODE_DMA)
   {
@@ -459,8 +516,10 @@ void app_acq_stop(void)
   {
     (void)HAL_ADC_Stop_IT(&hadc1);
   }
-  (void)app_fxdisk_log_close();
-  acq_running = 0U;
+
+  /* Let a window that was already being summarised reach the queue. */
+  tx_thread_sleep(1);
+  acq_drain_and_close();
 }
 
 int app_acq_running(void)
@@ -468,14 +527,42 @@ int app_acq_running(void)
   return (acq_running != 0U) ? 1 : 0;
 }
 
+/* Consumer side: format one window record, append, and rotate when full.
+   Caller must hold the media lock. */
+static int acq_write_record(const acq_record_t *rec)
+{
+  char line[ACQ_LINE_MAX];
+  uint32_t size = 0U;
+  int len;
+
+  len = snprintf(line, sizeof(line), "%lu,%lu,%lu,%lu,%lu\r\n",
+                 (unsigned long)rec->index,
+                 (unsigned long)rec->min,
+                 (unsigned long)rec->max,
+                 (unsigned long)rec->avg,
+                 (unsigned long)rec->count);
+  if ((len <= 0) || (app_fxdisk_log_write(line, (uint32_t)len) != 0))
+  {
+    return -1;
+  }
+
+  if ((app_fxdisk_log_size(&size) == 0) && (size >= APP_ACQ_FILE_MAX_BYTES))
+  {
+    if (acq_open_file() != 0)
+    {
+      return -2;
+    }
+  }
+  return 0;
+}
+
+/* Producer side: statistics only, never touches the file system. */
 static void acq_process_window(void)
 {
+  acq_record_t rec;
   uint32_t minimum = 0xFFFFU;
   uint32_t maximum = 0U;
   uint32_t sum = 0U;
-  uint32_t size = 0UL;
-  char line[ACQ_LINE_MAX];
-  int len;
 
   for (uint32_t i = 0U; i < APP_ACQ_WINDOW_SAMPLES; i++)
   {
@@ -517,21 +604,72 @@ static void acq_process_window(void)
   acq_sum += sum;
   acq_samples_done += APP_ACQ_WINDOW_SAMPLES;
 
-  len = snprintf(line, sizeof(line), "%lu,%lu,%lu,%lu,%lu\r\n",
-                 (unsigned long)acq_windows_done,
-                 (unsigned long)minimum,
-                 (unsigned long)maximum,
-                 (unsigned long)(sum / APP_ACQ_WINDOW_SAMPLES),
-                 (unsigned long)APP_ACQ_WINDOW_SAMPLES);
-  if ((len > 0) && (app_fxdisk_log_write(line, (uint32_t)len) == 0))
+  rec.index = acq_windows_done;
+  rec.min = minimum;
+  rec.max = maximum;
+  rec.avg = sum / APP_ACQ_WINDOW_SAMPLES;
+  rec.count = APP_ACQ_WINDOW_SAMPLES;
+
+  if (tx_queue_send(&acq_queue, &rec, TX_NO_WAIT) == TX_SUCCESS)
   {
     acq_windows_done++;
   }
-
-  if ((app_fxdisk_log_size(&size) == 0) && (size >= APP_ACQ_FILE_MAX_BYTES))
+  else
   {
-    (void)app_fxdisk_log_close();
-    (void)acq_open_file();
+    acq_windows_dropped++;
+  }
+}
+
+/* Write everything still queued, then close; used when a capture stops so the
+   console thread can hand the file over in a defined state. */
+static void acq_drain_and_close(void)
+{
+  acq_record_t rec;
+
+  if (app_fxdisk_lock() != 0)
+  {
+    return;
+  }
+  while (tx_queue_receive(&acq_queue, &rec, TX_NO_WAIT) == TX_SUCCESS)
+  {
+    (void)acq_write_record(&rec);
+  }
+  (void)app_fxdisk_log_close();
+  (void)app_fxdisk_unlock();
+}
+
+/* Writer thread: drains the queue in batches and flushes once per batch. */
+void app_acq_writer_entry(unsigned long thread_input)
+{
+  (void)thread_input;
+
+  for (;;)
+  {
+    app_hb_mark(APP_HB_WRITER);
+
+    acq_record_t rec;
+    uint32_t lines = 0U;
+    int locked = (app_fxdisk_lock() == 0);
+
+    if (locked)
+    {
+      while (tx_queue_receive(&acq_queue, &rec, TX_NO_WAIT) == TX_SUCCESS)
+      {
+        if (acq_write_record(&rec) != 0)
+        {
+          acq_windows_dropped++;
+        }
+        lines++;
+      }
+      if (lines > 0U)
+      {
+        (void)app_fxdisk_log_flush();
+        acq_flush_batches++;
+      }
+      (void)app_fxdisk_unlock();
+    }
+
+    tx_thread_sleep(ACQ_WRITE_PERIOD_TICKS);
   }
 }
 
@@ -552,10 +690,13 @@ void app_acq_thread_entry(unsigned long thread_input)
         acq_dma_feed_ring();
       }
 
+      /* Drain every complete window: above ~50 kHz several of them pile up
+         between two 10 ms ticks. */
       pending = (acq_ring_head - acq_ring_tail) & (ACQ_RING_SAMPLES - 1U);
-      if (pending >= APP_ACQ_WINDOW_SAMPLES)
+      while (pending >= APP_ACQ_WINDOW_SAMPLES)
       {
         acq_process_window();
+        pending = (acq_ring_head - acq_ring_tail) & (ACQ_RING_SAMPLES - 1U);
       }
     }
 
@@ -565,7 +706,7 @@ void app_acq_thread_entry(unsigned long thread_input)
 
 void app_acq_report(void)
 {
-  app_log_printf("ACQ running=%d mode=%s rate=%lu file=%s windows=%lu samples=%lu files=%lu min=%lu max=%lu drop=%lu dma_ovr=%lu\r\n",
+  app_log_printf("ACQ running=%d mode=%s rate=%lu file=%s windows=%lu samples=%lu files=%lu min=%lu max=%lu drop=%lu dma_ovr=%lu qdrop=%lu flush=%lu\r\n",
                  (int)acq_running,
                  (acq_mode == ACQ_MODE_DMA) ? "dma" : "irq",
                  (unsigned long)acq_rate_hz,
@@ -576,7 +717,9 @@ void app_acq_report(void)
                  (unsigned long)((acq_min == 0xFFFFFFFFU) ? 0U : acq_min),
                  (unsigned long)acq_max,
                  (unsigned long)acq_ring_drops,
-                 (unsigned long)acq_dma_overruns);
+                 (unsigned long)acq_dma_overruns,
+                 (unsigned long)acq_windows_dropped,
+                 (unsigned long)acq_flush_batches);
 
   if (acq_mode == ACQ_MODE_DMA)
   {
@@ -676,15 +819,26 @@ int app_acq_check(void)
   acq_parse_t ctx;
   uint32_t total = 0U;
   int rc;
+  int result;
 
   memset(&ctx, 0, sizeof(ctx));
   ctx.min = 0xFFFFFFFFU;
 
+  if (app_fxdisk_lock() != 0)
+  {
+    return -9;
+  }
+
   if (acq_current[0] == '\0')
   {
     app_log_printf("ACQ CHECK FAIL reason=no-file\r\n");
+    (void)app_fxdisk_unlock();
     return -1;
   }
+
+  /* Flush first: the writer batches, so the tail of the file may still be in
+     the media cache. */
+  (void)app_fxdisk_log_flush();
 
   rc = app_fxdisk_read_stream(acq_current, acq_parse_chunk, &ctx, &total);
   if ((ctx.used > 0U) && (rc == 0))
@@ -697,11 +851,16 @@ int app_acq_check(void)
     app_log_printf("ACQ CHECK FAIL file=%s rc=%d line=%lu lines=%lu bytes=%lu\r\n",
                    acq_current, rc, (unsigned long)ctx.bad_line,
                    (unsigned long)ctx.lines, (unsigned long)total);
-    return -2;
+    result = -2;
+  }
+  else
+  {
+    app_log_printf("ACQ CHECK PASS file=%s lines=%lu samples=%lu min=%lu max=%lu bytes=%lu\r\n",
+                   acq_current, (unsigned long)ctx.lines, (unsigned long)ctx.samples,
+                   (unsigned long)ctx.min, (unsigned long)ctx.max, (unsigned long)total);
+    result = 0;
   }
 
-  app_log_printf("ACQ CHECK PASS file=%s lines=%lu samples=%lu min=%lu max=%lu bytes=%lu\r\n",
-                 acq_current, (unsigned long)ctx.lines, (unsigned long)ctx.samples,
-                 (unsigned long)ctx.min, (unsigned long)ctx.max, (unsigned long)total);
-  return 0;
+  (void)app_fxdisk_unlock();
+  return result;
 }

@@ -8,8 +8,10 @@
 #define APP_ACQ_FILE_MAX_BYTES  2048U
 #define APP_ACQ_FILE_KEEP       4U
 
+void app_acq_system_init(void);
 void app_acq_init(void);
 void app_acq_thread_entry(unsigned long thread_input);
+void app_acq_writer_entry(unsigned long thread_input);
 /* use_dma: 0 = ADC end-of-conversion interrupt, 1 = GPDMA circular transfer.
    hz: 0 keeps the current rate, otherwise 1000..100000 Hz. */
 int app_acq_start(int use_dma, uint32_t hz);

@@ -9,7 +9,8 @@
 **软件栈验证阶段**：先把 FileX + LevelX 和"采集 → 落盘 → 回读校验"这条链路
 跑通，再谈真实介质。当前链路：TIM3 触发 ADC1 → **GPDMA 循环缓冲或 EOC 中断**
 → 环形缓冲 → 窗口统计 → CSV 追加 → 2 KB 轮转 → `acq check` 逐行回读校验。
-默认 10 kHz，DMA 模式实测 50 kHz 零丢弃（`acq start dma 50000`）；再往上瓶颈是写盘而不是采样。
+默认 10 kHz；DMA 模式实测 **100 kHz 零丢样**（`acq start dma 100000`）——采样线程只算统计，
+独立 writer 线程批量落盘。
 
 ## 为什么要模拟盘
 
@@ -34,8 +35,8 @@
 | 磨损均衡 | LevelX NOR | 逻辑扇区→物理扇区映射、作废标记、块回收 |
 | 物理介质 | `app_fxdisk.c` 中的 RAM 模拟 NOR | 8 块 × 16 扇区 × 512 B = 64 KiB；每块 1 扇区做元数据，可用 120 逻辑扇区 |
 | 观测 | `FSD` 状态行 | 驱动读/写次数、LevelX 块分配/作废/空闲、每块擦除计数、**1→0 违规计数** |
-| 采集 | TIM3 10 kHz 触发 ADC1（PC0/A1），EOC 中断写入 1024 点环形缓冲 | 采样线程按 50 ms 窗口统计 min/max/avg，追加到 CSV |
-| 落盘 | `LOGnnnn.CSV`（序号,min,max,avg,count），2 KB 轮转，保留 4 个文件 | 复用上面的 FileX/LevelX 盘；文件句柄常开，关闭时 `fx_media_flush` |
+| 采集 | TIM3 触发 ADC1（PC0/A1）：EOC 中断或 GPDMA 循环链表 → 2048 点环形缓冲 | `sampler` 线程只做窗口统计（min/max/avg），结果入 32 深 `TX_QUEUE` |
+| 落盘 | `LOGnnnn.CSV`（序号,min,max,avg,count），2 KB 轮转，保留 4 个文件 | `writer` 线程每 50 ms 批量写出并 flush 一次；`app_fxdisk_lock()` 与 `fs` 命令互斥 |
 | 回读校验 | `acq check` 逐行解析最新日志 | 校验字段数、`min ≤ avg ≤ max`、最大值 ≤ 4095、每行 500 样本 |
 
 `violations=0` 是关键指标：它统计"尝试把 0 写成 1"的次数。恒为 0 说明 LevelX
@@ -45,7 +46,7 @@
 
 | 项目 | 结果 |
 | --- | --- |
-| 构建 | `text 218,492 / data 2,380 / bss 109,384`，`.bin` 220,876 B（模拟 NOR 占 64 KiB bss） |
+| 构建 | `text 222,180 / data 2,388 / bss 113,416`，`.bin` 224,572 B（模拟 NOR 占 64 KiB bss） |
 | 启动 | `FSD mount=formatted sectors=120 reason=1` → `READY tx-filex-simdisk 1.0.0` |
 | 挂载信息 | `FSD mounted=1 media=SIMDISK sectors=120 sector_bytes=512 free_bytes=58368` |
 | 写读闭环 | `fs write DEMO.TXT hello-simdisk` → 回读 `text=hello-simdisk`；`append` 后 `hello-simdisk+more` |
@@ -55,15 +56,15 @@
 | 重复改写 | `fs stress 60`：127 次扇区写、123 次块分配、93 个作废扇区、2 次块擦除，`violations=0`，校验全通过 |
 | 卸载/重挂 | `fs umount` → `fs mount` 后数据仍在（`FS f=FILL.BIN`） |
 | 重新格式化 | `fs format` → `FS format=ok rc=0`，`fs count=0` |
-| 采集（中断） | `acq start irq 10000` 9.2 s：`windows=184 samples=92000 drop=0` |
-| 采集（DMA） | `acq start dma` 3.2 s：`windows=64 samples=32000 drop=0 dma_ovr=0` |
-| 高采样率 | `acq start dma 50000` 4.2 s：`windows=422 samples=211000 drop=0 dma_ovr=0`，5 倍速率零丢弃 |
-| 文件轮转 | 50 kHz 采集 4.2 s 写满 `LOG0000..LOG0003.CSV`（各 2 KB），`files=4` |
-| 写盘瓶颈 | `acq start dma 100000` 3.2 s：只落下 `samples=162500`、`drop=160049`，采样线程自己写盘已跟不上——下一步要解耦采集与落盘 |
+| 采集（中断） | `acq start irq 10000` 9.2 s：`windows=184 samples=92000 drop=0 qdrop=0` |
+| 采集（DMA） | `acq start dma 50000` 4.2 s：`windows=424 samples=212000 drop=0 dma_ovr=0 qdrop=0` |
+| 高采样率 | `acq start dma 100000` 4.2 s：`windows=844 samples=422000 drop=0 qdrop=0 dma_ovr=3`，10 倍速率零丢样 |
+| 文件轮转 | 100 kHz 采集 4.2 s 写满 `LOG0000..LOG0003.CSV`（各 2 KB），`files=4` |
+| 落盘批处理 | `flush=85`（4.2 s）≈ 每 50 ms 一次，而之前每行 flush 一次（`flush=184` / 9.2 s @10 kHz） |
 | 回读校验 | `acq check` → `ACQ CHECK PASS lines=81 samples=40500 min=299 max=528` |
 | GPDMA 诊断 | `dma test` 10 个用例：只有「安全通道 + 特权 + 安全源/目拍」落地，`DMA MEMTEST PASS` |
-| 线程栈 | `sampler=1400/2048`、`console=1364/4096`、`monitor=1008/2048` |
-| 一键自检 | `./scripts/selfcheck.sh all`：`basic` 10、`fs` 19、`acq` 27、`dma` 19、`watchdog` 4、`fault` 5 全部 PASS |
+| 线程栈 | `sampler=356/2048`、`writer=1408/3072`、`console=1388/4096`、`monitor=1096/2048` |
+| 一键自检 | `./scripts/selfcheck.sh all`：`basic` 10、`fs` 19、`acq` 42、`dma` 20、`watchdog` 4、`fault` 5 全部 PASS |
 
 ## 串口命令
 
@@ -86,7 +87,7 @@ USART3（ST-LINK 虚拟串口，PD8/PD9，115200 8N1）。可靠性层命令
 | `fs format` / `fs mount` / `fs umount` | 重新格式化 / 挂载 / 卸载（采集中拒绝执行） |
 | `acq start [dma\|irq] [hz]` | 开始采集：`irq`=EOC 中断（默认），`dma`=GPDMA 循环；`hz` 1000..100000 |
 | `acq stop` | 停止采集并关闭日志文件 |
-| `acq info` | 运行状态、模式、采样率、窗口数、样本数、文件数、min/max、`drop`、`dma_ovr`，DMA 模式下附通道 1 寄存器 |
+| `acq info` | 运行状态、模式、采样率、窗口数、样本数、文件数、min/max、`drop`（环形缓冲溢出）、`dma_ovr`（DMA 半缓冲未取走）、`qdrop`（入队失败）、`flush`（批量刷写次数）；DMA 模式下附通道 1 寄存器 |
 | `acq check` | 回读最新日志并逐行校验，输出 `ACQ CHECK PASS/FAIL` |
 | `acq selftest` | 采集 1.5 s → 停止 → 校验，一条命令验证整条链路 |
 | `dma env` | 打印 SAU/GTZC MPCBB 的安全与特权归属、GPDMA1 通道属性 |
@@ -113,8 +114,8 @@ ARM GNU 工具链和 OpenOCD。Makefile 引入：
 ```sh
 ./scripts/selfcheck.sh basic     # 构建 + 符号 + 烧写 + 状态/栈/故障/日志
 ./scripts/selfcheck.sh fs        # 文件系统 19 项断言
-./scripts/selfcheck.sh acq       # 中断 + DMA 两种采集→落盘→回读 27 项断言
-./scripts/selfcheck.sh dma       # GPDMA 属性矩阵 + 测试后采集中断不被破坏 19 项断言
+./scripts/selfcheck.sh acq       # 中断 10 kHz + DMA 50/100 kHz 采集→落盘→回读 42 项断言
+./scripts/selfcheck.sh dma       # GPDMA 属性矩阵 + 测试后采集中断不被破坏 20 项断言
 ./scripts/selfcheck.sh watchdog  # 线程卡死 → IWDG 复位
 ./scripts/selfcheck.sh fault     # BusFault 记录与重启报告
 ./scripts/selfcheck.sh all       # 六组顺序执行

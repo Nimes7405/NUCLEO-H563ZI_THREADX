@@ -12,6 +12,7 @@ static TX_THREAD console_thread;
 static TX_THREAD prod_a_thread;
 static TX_THREAD prod_b_thread;
 static TX_THREAD sampler_thread;
+static TX_THREAD writer_thread;
 
 static UCHAR monitor_stack[APP_STACK_MONITOR] __attribute__((aligned(8)));
 static UCHAR logger_stack[APP_STACK_LOGGER] __attribute__((aligned(8)));
@@ -19,6 +20,7 @@ static UCHAR console_stack[APP_STACK_CONSOLE] __attribute__((aligned(8)));
 static UCHAR prod_a_stack[APP_STACK_PROD_A] __attribute__((aligned(8)));
 static UCHAR prod_b_stack[APP_STACK_PROD_B] __attribute__((aligned(8)));
 static UCHAR sampler_stack[APP_STACK_SAMPLER] __attribute__((aligned(8)));
+static UCHAR writer_stack[APP_STACK_WRITER] __attribute__((aligned(8)));
 
 static void monitor_entry(ULONG thread_input);
 static void logger_entry(ULONG thread_input);
@@ -31,6 +33,7 @@ void tx_application_define(VOID *first_unused_memory)
 
   app_log_init();
   app_fxdisk_system_init();
+  app_acq_system_init();
 
   app_stacks_bind(APP_STK_MONITOR, monitor_stack, sizeof(monitor_stack));
   app_stacks_bind(APP_STK_LOGGER, logger_stack, sizeof(logger_stack));
@@ -38,6 +41,7 @@ void tx_application_define(VOID *first_unused_memory)
   app_stacks_bind(APP_STK_PROD_A, prod_a_stack, sizeof(prod_a_stack));
   app_stacks_bind(APP_STK_PROD_B, prod_b_stack, sizeof(prod_b_stack));
   app_stacks_bind(APP_STK_SAMPLER, sampler_stack, sizeof(sampler_stack));
+  app_stacks_bind(APP_STK_WRITER, writer_stack, sizeof(writer_stack));
 
   if (tx_thread_create(&monitor_thread, "monitor", monitor_entry, 0U,
                        monitor_stack, sizeof(monitor_stack),
@@ -78,6 +82,14 @@ void tx_application_define(VOID *first_unused_memory)
   if (tx_thread_create(&sampler_thread, "sampler", app_acq_thread_entry, 0U,
                        sampler_stack, sizeof(sampler_stack),
                        APP_PRIO_SAMPLER, APP_PRIO_SAMPLER,
+                       TX_NO_TIME_SLICE, TX_AUTO_START) != TX_SUCCESS)
+  {
+    Error_Handler();
+  }
+
+  if (tx_thread_create(&writer_thread, "writer", app_acq_writer_entry, 0U,
+                       writer_stack, sizeof(writer_stack),
+                       APP_PRIO_WRITER, APP_PRIO_WRITER,
                        TX_NO_TIME_SLICE, TX_AUTO_START) != TX_SUCCESS)
   {
     Error_Handler();
