@@ -153,10 +153,12 @@ scripts/      selfcheck.sh, serial_check.py
 - **初始化时机**：`fx_system_initialize()` 会创建 FileX 系统定时器，必须在
   `tx_application_define()` 里调用；格式化/挂载放在 console 线程入口，
   避免在内核对象创建阶段做 I/O。
-- **采集不用 DMA**：TIM3 10 kHz 产生 TRGO 触发 ADC1 常规组，EOC 中断只做
-  "读 DR + 入环形缓冲"（1024 点）。采样线程每 50 ms 取 500 点统计后落盘。
-  这样控制环/日志线程不受影响，也避开了已验证失败但根因未定的 GPDMA 路径
-  （详见 [report.md](./report.md)）。
+- **采样与落盘必须分线程**：采样线程只做窗口统计并入队，独立 `writer` 线程
+  批量写盘并 flush。两者合一时 50 kHz 就是上限（100 kHz 丢一半），
+  详见 [report.md](./report.md)。
+- **GPDMA 的安全属性有两层**：通道级（`DMA_CHANNEL_SEC/PRIV`）之外，每个
+  数据拍还要 `DMA_CHANNEL_SRC_SEC/DEST_SEC`；只设通道级时 GTZC 会静默丢拍，
+  通道照常计数、照常进中断、错误标志全 0。用 `dma env` / `dma test` 自检。
 
 ## 已知限制
 
@@ -165,6 +167,19 @@ scripts/      selfcheck.sh, serial_check.py
 - 64 KiB 容量只为验证栈，不代表产品容量规划；真实介质要重算簇大小与 FAT 类型。
 - 没接 RTC，文件时间戳是 FileX 的固定初始值。
 - `fs fill` / `fs stress` 是调试命令，量产固件应通过编译开关裁掉（尚未实现）。
+
+## 单通道基线（已归档）
+
+本工程的**单通道**能力到此冻结，标签 `v1.0.0-single-channel`：
+
+- 采集口：ADC1_INP10 / PC0（Arduino A1），12 bit 单端，TIM3 触发
+- 路径：EOC 中断（默认 10 kHz）或 GPDMA 单节点循环链表（1–100 kHz）
+- 落盘：`sampler` 只统计入队，`writer` 每 50 ms 批量写 + 一次 flush
+- 验收：`./scripts/selfcheck.sh all` 六组断言（10 / 19 / 42 / 20 / 4 / 5）
+- 实测：100 kHz / 4.2 s → 422,000 样本，`drop=0 qdrop=0`，`dma_ovr=3`
+
+后续的**多通道**能力在独立工程/分支上开发，不改动本工程的采集口径；
+本工程继续作为回归基线使用。
 
 ## 文档
 
