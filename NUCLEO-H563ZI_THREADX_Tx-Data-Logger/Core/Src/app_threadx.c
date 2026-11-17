@@ -2,6 +2,7 @@
 #include "app_acq.h"
 #include "app_console.h"
 #include "app_fxdisk.h"
+#include "app_fxsd.h"
 #include "app_log.h"
 #include "app_stacks.h"
 #include "app_watchdog.h"
@@ -33,6 +34,7 @@ void tx_application_define(VOID *first_unused_memory)
 
   app_log_init();
   app_fxdisk_system_init();
+  app_fxsd_system_init();
   app_acq_system_init();
 
   app_stacks_bind(APP_STK_MONITOR, monitor_stack, sizeof(monitor_stack));

@@ -1128,3 +1128,336 @@ int app_acq_check(void)
   (void)app_fxdisk_unlock();
   return result;
 }
+
+
+/* HAL channel handles for the plain 0..19 indices, so a diagnostic can address
+   a channel by number instead of by macro name. */
+static const uint32_t acq_adc_channel_num[20] = {
+    ADC_CHANNEL_0,  ADC_CHANNEL_1,  ADC_CHANNEL_2,  ADC_CHANNEL_3,
+    ADC_CHANNEL_4,  ADC_CHANNEL_5,  ADC_CHANNEL_6,  ADC_CHANNEL_7,
+    ADC_CHANNEL_8,  ADC_CHANNEL_9,  ADC_CHANNEL_10, ADC_CHANNEL_11,
+    ADC_CHANNEL_12, ADC_CHANNEL_13, ADC_CHANNEL_14, ADC_CHANNEL_15,
+    ADC_CHANNEL_16, ADC_CHANNEL_17, ADC_CHANNEL_18, ADC_CHANNEL_19};
+
+/*
+ * Software-triggered single conversion.  The whole ADC1 configuration is
+ * rebuilt, so the regular triggered sequence is restored before returning;
+ * that makes this usable from the console between captures.
+ */
+int app_acq_one_shot(uint32_t adc_channel, uint32_t samples, uint32_t *raw)
+{
+  ADC_ChannelConfTypeDef channel = {0};
+  uint32_t ccr_saved;
+  uint32_t sum = 0U;
+  uint32_t got = 0U;
+
+  if (raw == NULL)
+  {
+    return -1;
+  }
+  if (acq_running != 0U)
+  {
+    return -2;
+  }
+  if (samples == 0U)
+  {
+    samples = 1U;
+  }
+  *raw = 0U;
+
+  if (hadc1.Instance != NULL)
+  {
+    (void)HAL_ADC_DeInit(&hadc1);
+  }
+
+  hadc1.Instance = ADC1;
+  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
+  hadc1.Init.Resolution = ADC_RESOLUTION_12B;
+  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE;
+  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  hadc1.Init.LowPowerAutoWait = DISABLE;
+  hadc1.Init.ContinuousConvMode = DISABLE;
+  hadc1.Init.NbrOfConversion = 1U;
+  hadc1.Init.DiscontinuousConvMode = DISABLE;
+  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
+  hadc1.Init.DMAContinuousRequests = DISABLE;
+  hadc1.Init.SamplingMode = ADC_SAMPLING_MODE_NORMAL;
+  hadc1.Init.Overrun = ADC_OVR_DATA_OVERWRITTEN;
+  if (HAL_ADC_Init(&hadc1) != HAL_OK)
+  {
+    acq_adc_config();
+    return -3;
+  }
+
+  /* Internal channels need their analog buffer switched on explicitly, and
+     leaving an unused buffer on would bias the external channels. */
+  ccr_saved = ADC12_COMMON->CCR;
+  {
+    uint32_t add = 0U;
+
+    /* The channel number lives in the AWD1CH bit positions, not in the low
+       bits, so it has to be shifted out before comparing. */
+    switch ((adc_channel & ADC_CHANNEL_ID_NUMBER_MASK) >>
+            ADC_CHANNEL_ID_NUMBER_BITOFFSET_POS)
+    {
+      case 16U: add = ADC_CCR_TSEN; break;
+      case 17U: add = ADC_CCR_VREFEN; break;
+      default: break;
+    }
+    if ((adc_channel & ADC_CHANNEL_ID_INTERNAL_CH_2) != 0U)
+    {
+      add |= ADC_CCR_VBATEN;
+    }
+    ADC12_COMMON->CCR = ccr_saved | add;
+  }
+
+  channel.Channel = adc_channel;
+  channel.Rank = ADC_REGULAR_RANK_1;
+  channel.SamplingTime = ADC_SAMPLETIME_640CYCLES_5;
+  channel.SingleDiff = ADC_SINGLE_ENDED;
+  channel.OffsetNumber = ADC_OFFSET_NONE;
+  channel.Offset = 0U;
+  if (HAL_ADC_ConfigChannel(&hadc1, &channel) != HAL_OK)
+  {
+    ADC12_COMMON->CCR = ccr_saved;
+    acq_adc_config();
+    return -4;
+  }
+
+  if (HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED) != HAL_OK)
+  {
+    ADC12_COMMON->CCR = ccr_saved;
+    acq_adc_config();
+    return -5;
+  }
+
+  for (uint32_t i = 0U; i < samples; i++)
+  {
+    if (HAL_ADC_Start(&hadc1) != HAL_OK)
+    {
+      break;
+    }
+    if (HAL_ADC_PollForConversion(&hadc1, 20U) == HAL_OK)
+    {
+      sum += HAL_ADC_GetValue(&hadc1);
+      got++;
+    }
+    (void)HAL_ADC_Stop(&hadc1);
+  }
+
+  if (got != 0U)
+  {
+    *raw = sum / got;
+  }
+  ADC12_COMMON->CCR = ccr_saved;
+  acq_adc_config();
+  return (got != 0U) ? 0 : -6;
+}
+
+int app_acq_sample_index(uint32_t adc_channel_number, uint32_t samples,
+                         uint32_t *raw)
+{
+  if (adc_channel_number >= 20U)
+  {
+    return -7;
+  }
+  return app_acq_one_shot(acq_adc_channel_num[adc_channel_number], samples, raw);
+}
+
+/* 12-bit codes as a band: rails are <=5 % and >=95 % of full scale. */
+static const char *acq_level_band(uint32_t raw)
+{
+  if (raw <= 205U)
+  {
+    return "low";
+  }
+  if (raw >= 3890U)
+  {
+    return "high";
+  }
+  return "mid";
+}
+
+static uint32_t acq_level_mv(uint32_t raw, uint32_t vdd_mv)
+{
+  if (vdd_mv == 0U)
+  {
+    return 0U;
+  }
+  return (uint32_t)(((uint64_t)raw * (uint64_t)vdd_mv) / 4095ULL);
+}
+
+void app_acq_level_report(uint32_t adc_channel_number, int have_channel)
+{
+  uint32_t vdd_mv = 0U;
+
+  if (have_channel != 0)
+  {
+    uint32_t raw = 0U;
+    int rc = app_acq_sample_index(adc_channel_number, 8U, &raw);
+
+    if (rc == 0)
+    {
+      app_log_printf("ACQ LEVEL adc=%lu raw=%lu band=%s\r\n",
+                     (unsigned long)adc_channel_number, (unsigned long)raw,
+                     acq_level_band(raw));
+    }
+    else
+    {
+      app_log_printf("ACQ LEVEL adc=%lu rc=%d\r\n",
+                     (unsigned long)adc_channel_number, rc);
+    }
+    return;
+  }
+
+  /* Sample the pins first: an internal channel leaves its voltage on the
+     sample-and-hold capacitor, which biases whatever follows. */
+  for (uint32_t i = 0U; i < acq_channels; i++)
+  {
+    uint32_t raw = 0U;
+    int rc = app_acq_one_shot(acq_chan_table[i].adc_channel, 8U, &raw);
+
+    if (rc != 0)
+    {
+      app_log_printf("ACQ LEVEL ch=%lu pad=%s rc=%d\r\n",
+                     (unsigned long)i, acq_chan_table[i].name, rc);
+      continue;
+    }
+    app_log_printf("ACQ LEVEL ch=%lu adc=%lu pad=%s raw=%lu band=%s\r\n",
+                   (unsigned long)i,
+                   (unsigned long)((acq_chan_table[i].adc_channel &
+                                    ADC_CHANNEL_ID_NUMBER_MASK) >>
+                                   ADC_CHANNEL_ID_NUMBER_BITOFFSET_POS),
+                   acq_chan_table[i].name, (unsigned long)raw,
+                   acq_level_band(raw));
+  }
+
+  {
+    uint32_t vref = 0U;
+    int rc = app_acq_one_shot(ADC_CHANNEL_VREFINT, 8U, &vref);
+
+    if ((rc == 0) && (vref != 0U))
+    {
+      /* VREFINT is 1.21 V nominal on this family. */
+      vdd_mv = (uint32_t)((1210ULL * 4095ULL) / (uint64_t)vref);
+      app_log_printf("ACQ LEVEL vrefint raw=%lu vdd_mv=%lu\r\n",
+                     (unsigned long)vref, (unsigned long)vdd_mv);
+    }
+    else
+    {
+      app_log_printf("ACQ LEVEL vrefint rc=%d\r\n", rc);
+    }
+
+    /* The internal channels are the ones that do not depend on the pads, so
+       they tell a dead analog front end apart from a wiring problem. */
+    {
+      uint32_t ts = 0U;
+      uint32_t vbat = 0U;
+
+      rc = app_acq_one_shot(ADC_CHANNEL_TEMPSENSOR, 8U, &ts);
+      if (rc == 0)
+      {
+        app_log_printf("ACQ LEVEL tempsensor raw=%lu mv=%lu\r\n",
+                       (unsigned long)ts,
+                       (unsigned long)acq_level_mv(ts, vdd_mv));
+      }
+      else
+      {
+        app_log_printf("ACQ LEVEL tempsensor rc=%d\r\n", rc);
+      }
+
+      rc = app_acq_one_shot(ADC_CHANNEL_VBAT, 8U, &vbat);
+      if (rc == 0)
+      {
+        /* The VBAT channel sees VBAT through a 1/4 divider ladder. */
+        app_log_printf("ACQ LEVEL vbat raw=%lu mv=%lu\r\n",
+                       (unsigned long)vbat,
+                       (unsigned long)(acq_level_mv(vbat, vdd_mv) * 4ULL));
+      }
+      else
+      {
+        app_log_printf("ACQ LEVEL vbat rc=%d\r\n", rc);
+      }
+    }
+  }
+
+  if (vdd_mv != 0U)
+  {
+    for (uint32_t i = 0U; i < acq_channels; i++)
+    {
+      uint32_t raw = 0U;
+
+      if (app_acq_one_shot(acq_chan_table[i].adc_channel, 8U, &raw) != 0)
+      {
+        continue;
+      }
+      app_log_printf("ACQ LEVEL ch=%lu pad=%s mv=%lu\r\n",
+                     (unsigned long)i, acq_chan_table[i].name,
+                     (unsigned long)acq_level_mv(raw, vdd_mv));
+    }
+  }
+}
+
+/*
+ * Diagnostic: drive DAC1 channel 1 (PA4) and read it back on ADC1_INP18, which
+ * is the same pad.  The DAC and the ADC are both internal, so this shows
+ * whether an external channel can see a pad that the chip itself drives.
+ */
+int app_acq_dac_loopback(uint32_t code, uint32_t *raw)
+{
+  static DAC_HandleTypeDef hdac1;
+  DAC_ChannelConfTypeDef cfg = {0};
+  int rc;
+
+  if ((raw == NULL) || (code > 4095U))
+  {
+    return -1;
+  }
+  if (acq_running != 0U)
+  {
+    return -2;
+  }
+
+  __HAL_RCC_DAC1_CLK_ENABLE();
+
+  hdac1.Instance = DAC1;
+  if (HAL_DAC_Init(&hdac1) != HAL_OK)
+  {
+    return -3;
+  }
+
+  cfg.DAC_HighFrequency = DAC_HIGH_FREQUENCY_INTERFACE_MODE_DISABLE;
+  cfg.DAC_DMADoubleDataMode = DISABLE;
+  cfg.DAC_SignedFormat = DISABLE;
+  cfg.DAC_SampleAndHold = DAC_SAMPLEANDHOLD_DISABLE;
+  cfg.DAC_Trigger = DAC_TRIGGER_NONE;
+  cfg.DAC_OutputBuffer = DAC_OUTPUTBUFFER_ENABLE;
+  cfg.DAC_ConnectOnChipPeripheral = DAC_CHIPCONNECT_EXTERNAL;
+  cfg.DAC_UserTrimming = DAC_TRIMMING_FACTORY;
+  cfg.DAC_TrimmingValue = 0U;
+  if (HAL_DAC_ConfigChannel(&hdac1, &cfg, DAC_CHANNEL_1) != HAL_OK)
+  {
+    (void)HAL_DAC_DeInit(&hdac1);
+    return -4;
+  }
+  if (HAL_DAC_SetValue(&hdac1, DAC_CHANNEL_1, DAC_ALIGN_12B_R, code) != HAL_OK)
+  {
+    (void)HAL_DAC_DeInit(&hdac1);
+    return -5;
+  }
+  if (HAL_DAC_Start(&hdac1, DAC_CHANNEL_1) != HAL_OK)
+  {
+    (void)HAL_DAC_DeInit(&hdac1);
+    return -6;
+  }
+
+  tx_thread_sleep(APP_MS_TO_TICKS(2));
+  rc = app_acq_one_shot(ADC_CHANNEL_18, 8U, raw);
+
+  (void)HAL_DAC_Stop(&hdac1, DAC_CHANNEL_1);
+  (void)HAL_DAC_DeInit(&hdac1);
+  __HAL_RCC_DAC1_CLK_DISABLE();
+  return rc;
+}

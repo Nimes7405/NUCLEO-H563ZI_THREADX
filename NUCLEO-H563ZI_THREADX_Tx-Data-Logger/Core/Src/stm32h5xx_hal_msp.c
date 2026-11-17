@@ -64,3 +64,43 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef *hadc)
     HAL_NVIC_EnableIRQ(ADC1_IRQn);
   }
 }
+
+void HAL_SPI_MspInit(SPI_HandleTypeDef *hspi)
+{
+  if (hspi->Instance == SPI1)
+  {
+    GPIO_InitTypeDef gpio = {0};
+
+    __HAL_RCC_SPI1_CLK_ENABLE();
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    __HAL_RCC_GPIOG_CLK_ENABLE();
+    __HAL_RCC_GPIOD_CLK_ENABLE();
+
+    /* SCK PA5 (D13), MISO PG9 (D12), MOSI PB5 (D11). MISO keeps an internal
+       pull-up so an absent card reads back as 0xFF instead of noise; the pin
+       must stay in alternate-function mode or the SPI never sees the line. */
+    gpio.Mode = GPIO_MODE_AF_PP;
+    gpio.Pull = GPIO_NOPULL;
+    gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    gpio.Alternate = GPIO_AF5_SPI1;
+
+    gpio.Pin = GPIO_PIN_5;
+    HAL_GPIO_Init(GPIOA, &gpio);
+
+    gpio.Pin = GPIO_PIN_5;
+    HAL_GPIO_Init(GPIOB, &gpio);
+
+    gpio.Pull = GPIO_NOPULL;
+    gpio.Pin = GPIO_PIN_9;
+    HAL_GPIO_Init(GPIOG, &gpio);
+
+    /* CS on D10 is driven by software. */
+    gpio.Mode = GPIO_MODE_OUTPUT_PP;
+    gpio.Pull = GPIO_NOPULL;
+    gpio.Speed = GPIO_SPEED_FREQ_HIGH;
+    gpio.Pin = GPIO_PIN_14;
+    HAL_GPIO_Init(GPIOD, &gpio);
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, GPIO_PIN_SET);
+  }
+}

@@ -26,6 +26,17 @@ int app_acq_demux_selftest(void);
 void app_acq_stop(void);
 int app_acq_running(void);
 void app_acq_report(void);
+/* Software-triggered one-shot conversion; also accepts internal channels such
+   as ADC_CHANNEL_VREFINT.  Refused while a capture is running. */
+int app_acq_one_shot(uint32_t adc_channel, uint32_t samples, uint32_t *raw);
+/* Sample channel `adc_channel_number` (plain 0..19 index) once. */
+int app_acq_sample_index(uint32_t adc_channel_number, uint32_t samples,
+                         uint32_t *raw);
+/* have_channel: 0 prints every configured pin plus VREFINT and the VDD
+   estimate; 1 samples only `adc_channel_number`. */
+void app_acq_level_report(uint32_t adc_channel_number, int have_channel);
+/* Diagnostic: DAC1_OUT1 (PA4) -> ADC1_INP18 loopback on the same pad. */
+int app_acq_dac_loopback(uint32_t code, uint32_t *raw);
 int app_acq_check(void);
 
 #endif

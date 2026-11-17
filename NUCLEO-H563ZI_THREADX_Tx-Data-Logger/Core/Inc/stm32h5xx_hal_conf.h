@@ -12,6 +12,8 @@
 #define HAL_UART_MODULE_ENABLED
 #define HAL_IWDG_MODULE_ENABLED
 #define HAL_ADC_MODULE_ENABLED
+#define HAL_DAC_MODULE_ENABLED
+#define HAL_SPI_MODULE_ENABLED
 
 #define HSE_VALUE 8000000UL
 #define HSE_STARTUP_TIMEOUT 100UL
@@ -80,6 +82,14 @@
 #ifdef HAL_ADC_MODULE_ENABLED
 #include "stm32h5xx_hal_adc.h"
 #include "stm32h5xx_hal_adc_ex.h"
+#endif
+#ifdef HAL_DAC_MODULE_ENABLED
+#include "stm32h5xx_hal_dac.h"
+#include "stm32h5xx_hal_dac_ex.h"
+#endif
+#ifdef HAL_SPI_MODULE_ENABLED
+#include "stm32h5xx_hal_spi.h"
+#include "stm32h5xx_hal_spi_ex.h"
 #endif
 
 #ifdef USE_FULL_ASSERT

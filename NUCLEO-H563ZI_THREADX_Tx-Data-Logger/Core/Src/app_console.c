@@ -5,6 +5,8 @@
 #include "app_fault.h"
 #include "app_fxdisk.h"
 #include "app_log.h"
+#include "app_sdspi.h"
+#include "app_fxsd.h"
 #include "app_stacks.h"
 #include "app_watchdog.h"
 
@@ -28,6 +30,7 @@ static void console_help(void);
 static void console_acq(const char *arg);
 static void console_dma(const char *arg);
 static void console_fs(const char *arg);
+static void console_sd(const char *arg);
 static void console_stall(const char *arg);
 
 void app_console_init(void)
@@ -170,7 +173,7 @@ void app_console_status(void)
 
 static void console_help(void)
 {
-  app_log_printf("HELP commands: status stack fault wdg log <text> fs <info|ls|format|mount|umount|write|append|read|rm|test|fill|stress> acq <info|start [dma|irq] [hz]|stop|check|selftest|ch [1-4]|demux> dma <env|test> stall <0|1|2> crash reboot\r\n");
+  app_log_printf("HELP commands: status stack fault wdg log <text> fs <info|ls|format|mount|umount|write|append|read|rm|test|fill|stress> acq <info|start [dma|irq] [hz]|stop|check|selftest|ch [1-4]|demux|level [0-19]|dac [0-4095]> sd <raw|fs> dma <env|test> stall <0|1|2> crash reboot\r\n");
 }
 
 static void console_fault_report(void)
@@ -281,6 +284,35 @@ static void console_acq(const char *arg)
     return;
   }
 
+  if (strncmp(arg, "level", 5) == 0)
+  {
+    const char *rest = arg + 5;
+
+    while (*rest == ' ')
+    {
+      rest++;
+    }
+    if (*rest == '\0')
+    {
+      app_acq_level_report(0U, 0);
+    }
+    else
+    {
+      unsigned long ch = strtoul(rest, NULL, 10);
+
+      if (ch >= 20UL)
+      {
+        app_log_printf("ERR usage: acq level [0-19]\r\n");
+      }
+      else
+      {
+        app_log_printf("ACQ LEVEL channel=%lu\r\n", ch);
+        app_acq_level_report((uint32_t)ch, 1);
+      }
+    }
+    return;
+  }
+
   if (strcmp(arg, "check") == 0)
   {
     (void)app_acq_check();
@@ -300,6 +332,32 @@ static void console_acq(const char *arg)
     app_acq_stop();
     rc = app_acq_check();
     app_log_printf("ACQ SELFTEST %s rc=%d\r\n", (rc == 0) ? "PASS" : "FAIL", rc);
+    return;
+  }
+
+  if (strncmp(arg, "dac", 3) == 0)
+  {
+    uint32_t code = 2048U;
+    uint32_t raw = 0U;
+    const char *rest = arg + 3;
+    int rc;
+
+    while (*rest == ' ')
+    {
+      rest++;
+    }
+    if (*rest != '\0')
+    {
+      code = (uint32_t)strtoul(rest, NULL, 10);
+      if (code > 4095U)
+      {
+        app_log_printf("ERR usage: acq dac [0-4095]\r\n");
+        return;
+      }
+    }
+    rc = app_acq_dac_loopback(code, &raw);
+    app_log_printf("ACQ DAC code=%lu rc=%d adc18=%lu\r\n",
+                   (unsigned long)code, rc, (unsigned long)raw);
     return;
   }
 
@@ -560,6 +618,298 @@ static void console_fs(const char *arg)
   (void)app_fxdisk_unlock();
 }
 
+/* Raw SPI-mode SD access, used to prove the card and the wiring before FileX
+   is layered on top. */
+static void console_sd(const char *arg)
+{
+  static uint8_t block[APP_SD_BLOCK_SIZE];
+
+  while (*arg == ' ')
+  {
+    arg++;
+  }
+
+  if ((*arg == '\0') || (strcmp(arg, "info") == 0))
+  {
+    if (app_sdspi_ready() == 0)
+    {
+      int rc = app_sdspi_init();
+
+      app_log_printf("SD init rc=%d\r\n", rc);
+      if (rc != 0)
+      {
+        app_sdspi_info();
+        return;
+      }
+    }
+    app_sdspi_info();
+    return;
+  }
+
+  if (strcmp(arg, "pins") == 0)
+  {
+    app_sdspi_pins();
+    return;
+  }
+
+  if (strcmp(arg, "jump") == 0)
+  {
+    app_sdspi_jump();
+    return;
+  }
+
+  if (strcmp(arg, "echo") == 0)
+  {
+    app_sdspi_echo();
+    return;
+  }
+
+  if (strncmp(arg, "rdprobe", 7) == 0)
+  {
+    app_sdspi_read_probe((uint32_t)strtoul(arg + 7, NULL, 10));
+    return;
+  }
+
+  if (strcmp(arg, "probe") == 0)
+  {
+    app_sdspi_probe();
+    return;
+  }
+
+  if (strcmp(arg, "init") == 0)
+  {
+    int rc;
+
+    /* A different card invalidates whatever volume was mounted before. */
+    (void)app_fxsd_unmount();
+    rc = app_sdspi_init();
+
+    app_log_printf("SD init rc=%d\r\n", rc);
+    if (rc == 0)
+    {
+      app_sdspi_info();
+    }
+    return;
+  }
+
+  if (strncmp(arg, "read", 4) == 0)
+  {
+    unsigned long lba = strtoul(arg + 4, NULL, 10);
+    int rc;
+
+    if (app_sdspi_ready() == 0)
+    {
+      app_log_printf("ERR sd-not-ready\r\n");
+      return;
+    }
+    rc = app_sdspi_read_block((uint32_t)lba, block);
+    if (rc != 0)
+    {
+      app_log_printf("SD read lba=%lu rc=%d\r\n", lba, rc);
+      return;
+    }
+    app_log_printf("SD read lba=%lu rc=0 sig=%02x%02x type=%02x mbr=%02x%02x\r\n",
+                   lba, block[510], block[511], block[450], block[0], block[1]);
+    for (uint32_t row = 0U; row < 2U; row++)
+    {
+      const uint8_t *p = &block[row * 8U];
+
+      app_log_printf("SD data %02x %02x %02x %02x %02x %02x %02x %02x\r\n",
+                     p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
+    }
+    return;
+  }
+
+  if (strncmp(arg, "wtest", 5) == 0)
+  {
+    unsigned long lba = strtoul(arg + 5, NULL, 10);
+    uint32_t seed = (uint32_t)lba + 1U;
+    uint32_t bad = 0U;
+    int rc;
+
+    if (app_sdspi_ready() == 0)
+    {
+      app_log_printf("ERR sd-not-ready\r\n");
+      return;
+    }
+    for (uint32_t i = 0U; i < APP_SD_BLOCK_SIZE; i++)
+    {
+      block[i] = (uint8_t)((seed * 31U) + i);
+    }
+    rc = app_sdspi_write_block((uint32_t)lba, block);
+    app_log_printf("SD wtest lba=%lu write_rc=%d\r\n", lba, rc);
+    if (rc != 0)
+    {
+      return;
+    }
+
+    (void)memset(block, 0, sizeof(block));
+    rc = app_sdspi_read_block((uint32_t)lba, block);
+    if (rc != 0)
+    {
+      app_log_printf("SD wtest lba=%lu read_rc=%d\r\n", lba, rc);
+      return;
+    }
+    for (uint32_t i = 0U; i < APP_SD_BLOCK_SIZE; i++)
+    {
+      if (block[i] != (uint8_t)((seed * 31U) + i))
+      {
+        bad++;
+      }
+    }
+    app_log_printf("SD wtest lba=%lu verify=%s mismatches=%lu\r\n",
+                   lba, (bad == 0U) ? "PASS" : "FAIL", (unsigned long)bad);
+    return;
+  }
+
+  if (strncmp(arg, "mount", 5) == 0)
+  {
+    if (app_fxsd_lock() != 0)
+    {
+      app_log_printf("ERR sd-busy\r\n");
+      return;
+    }
+    {
+      int rc = app_fxsd_mount();
+
+      app_log_printf("SD mount rc=%d\r\n", rc);
+      if (rc == 0)
+      {
+        app_fxsd_report();
+      }
+    }
+    (void)app_fxsd_unlock();
+    return;
+  }
+
+  if (strncmp(arg, "umount", 6) == 0)
+  {
+    (void)app_fxsd_lock();
+    app_log_printf("SD umount rc=%d\r\n", app_fxsd_unmount());
+    (void)app_fxsd_unlock();
+    return;
+  }
+
+  if (strncmp(arg, "format", 6) == 0)
+  {
+    uint32_t sectors = APP_FXSD_FORMAT_SECTORS_DEFAULT;
+    const char *rest = arg + 6;
+    int rc;
+
+    while (*rest == ' ')
+    {
+      rest++;
+    }
+    if (*rest != '\0')
+    {
+      sectors = (uint32_t)strtoul(rest, NULL, 10);
+    }
+
+    if (app_fxsd_lock() != 0)
+    {
+      app_log_printf("ERR sd-busy\r\n");
+      return;
+    }
+    rc = app_fxsd_format(sectors);
+    app_log_printf("SD format sectors=%lu rc=%d\r\n", (unsigned long)sectors, rc);
+    if (rc == 0)
+    {
+      app_fxsd_report();
+    }
+    (void)app_fxsd_unlock();
+    return;
+  }
+
+  if (strcmp(arg, "ls") == 0)
+  {
+    int count;
+
+    if (app_fxsd_lock() != 0)
+    {
+      app_log_printf("ERR sd-busy\r\n");
+      return;
+    }
+    count = app_fxsd_list();
+    app_log_printf("SD count=%d\r\n", count);
+    (void)app_fxsd_unlock();
+    return;
+  }
+
+  if (strncmp(arg, "put ", 4) == 0)
+  {
+    char name[APP_CON_FS_NAME_MAX];
+    const char *cursor = arg + 4;
+    const char *text;
+    size_t len = 0U;
+    int rc;
+
+    while ((*cursor != '\0') && (*cursor != ' ') && (len < (sizeof(name) - 1U)))
+    {
+      name[len++] = *cursor++;
+    }
+    name[len] = '\0';
+    while (*cursor == ' ')
+    {
+      cursor++;
+    }
+    text = cursor;
+
+    if ((len == 0U) || (*text == '\0'))
+    {
+      app_log_printf("ERR usage: sd put <name> <text>\r\n");
+      return;
+    }
+
+    (void)app_fxsd_lock();
+    rc = app_fxsd_write_file(name, text, 0);
+    app_log_printf("SD put name=%s rc=%d\r\n", name, rc);
+    (void)app_fxsd_unlock();
+    return;
+  }
+
+  if (strncmp(arg, "cat ", 4) == 0)
+  {
+    static char data[APP_CON_FS_DATA_MAX];
+    const char *cursor = arg + 4;
+    uint32_t got = 0U;
+    int rc;
+
+    while (*cursor == ' ')
+    {
+      cursor++;
+    }
+    (void)app_fxsd_lock();
+    rc = app_fxsd_read_file(cursor, data, sizeof(data), &got);
+    if (rc == 0)
+    {
+      app_log_printf("SD DATA name=%s bytes=%lu text=%s\r\n", cursor,
+                     (unsigned long)got, data);
+    }
+    else
+    {
+      app_log_printf("SD cat name=%s rc=%d\r\n", cursor, rc);
+    }
+    (void)app_fxsd_unlock();
+    return;
+  }
+
+  if (strncmp(arg, "rm ", 3) == 0)
+  {
+    const char *cursor = arg + 3;
+
+    while (*cursor == ' ')
+    {
+      cursor++;
+    }
+    (void)app_fxsd_lock();
+    app_log_printf("SD rm name=%s rc=%d\r\n", cursor, app_fxsd_delete(cursor));
+    (void)app_fxsd_unlock();
+    return;
+  }
+
+  app_log_printf("ERR usage: sd <info|pins|jump|echo|probe|rdprobe <lba>|init|read <lba>|wtest <lba>|mount|umount|format [sectors]|ls|put <name> <text>|cat <name>|rm <name>>\r\n");
+}
+
 static void console_dma(const char *arg)
 {
   while (*arg == ' ')
@@ -633,6 +983,10 @@ static void console_dispatch(char *line)
   else if (strncmp(line, "fs", 2) == 0)
   {
     console_fs(line + 2);
+  }
+  else if (strncmp(line, "sd", 2) == 0)
+  {
+    console_sd(line + 2);
   }
   else if (strncmp(line, "dma", 3) == 0)
   {

@@ -57,6 +57,8 @@ HAL_SRCS = \
 	$(HAL_DIR)/Src/stm32h5xx_hal_adc.c \
 	$(HAL_DIR)/Src/stm32h5xx_hal_adc_ex.c \
 	$(HAL_DIR)/Src/stm32h5xx_hal_cortex.c \
+	$(HAL_DIR)/Src/stm32h5xx_hal_dac.c \
+	$(HAL_DIR)/Src/stm32h5xx_hal_dac_ex.c \
 	$(HAL_DIR)/Src/stm32h5xx_hal_dma.c \
 	$(HAL_DIR)/Src/stm32h5xx_hal_dma_ex.c \
 	$(HAL_DIR)/Src/stm32h5xx_hal_flash.c \
@@ -65,6 +67,8 @@ HAL_SRCS = \
 	$(HAL_DIR)/Src/stm32h5xx_hal_pwr.c \
 	$(HAL_DIR)/Src/stm32h5xx_hal_pwr_ex.c \
 	$(HAL_DIR)/Src/stm32h5xx_hal_rcc.c \
+	$(HAL_DIR)/Src/stm32h5xx_hal_spi.c \
+	$(HAL_DIR)/Src/stm32h5xx_hal_spi_ex.c \
 	$(HAL_DIR)/Src/stm32h5xx_hal_rcc_ex.c \
 	$(HAL_DIR)/Src/stm32h5xx_hal_tim.c \
 	$(HAL_DIR)/Src/stm32h5xx_hal_tim_ex.c \
@@ -101,6 +105,8 @@ APP_SRCS = \
 	Core/Src/app_stacks.c \
 	Core/Src/app_fxdisk.c \
 	Core/Src/app_acq.c \
+	Core/Src/app_sdspi.c \
+	Core/Src/app_fxsd.c \
 	Core/Src/app_dma.c \
 	Core/Src/syscalls.c \
 	Core/Src/stm32h5xx_hal_msp.c \
