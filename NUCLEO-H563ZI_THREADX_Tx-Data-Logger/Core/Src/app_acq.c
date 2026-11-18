@@ -171,6 +171,10 @@ static volatile uint32_t acq_flush_batches;
 static volatile uint32_t acq_media_errors;
 static volatile uint32_t acq_media_gave_up;
 static uint32_t acq_last_flush_ms;
+/* Kept so a health check can inspect per-channel spread without re-reading the
+   log back off the medium. */
+static acq_record_t acq_last_record;
+static volatile uint32_t acq_last_record_valid;
 
 typedef struct
 {
@@ -577,6 +581,7 @@ int app_acq_start(int use_dma, uint32_t hz)
   acq_media_errors = 0U;
   acq_media_gave_up = 0U;
   acq_last_flush_ms = HAL_GetTick();
+  acq_last_record_valid = 0U;
   acq_eval_channels = acq_channels;
 
   if ((hz != 0U) && (hz != acq_rate_hz))
@@ -755,6 +760,8 @@ static int acq_write_record(const acq_record_t *rec)
     return -1;
   }
   acq_media_errors = 0U;
+  acq_last_record = *rec;
+  acq_last_record_valid = 1U;
 
   if ((acq_media->log_size(&size) == 0) && (size >= acq_file_max_bytes))
   {
@@ -1620,4 +1627,200 @@ const char *app_acq_target_name(void)
 int app_acq_media_gave_up(void)
 {
   return (acq_media_gave_up != 0U) ? 1 : 0;
+}
+
+/*
+ * Analog front-end health check.
+ *
+ * The bands below come from a known-good STM32F207 running the same kinds of
+ * measurement: VREFINT lands near 1495 and a DAC-driven pad tracks the code
+ * within about 1 %.  A part whose input path is dead leaves every external
+ * channel parked near mid-scale regardless of what is applied, which is what
+ * step 2 catches without needing any wiring.
+ */
+static int acq_check_band(const char *name, uint32_t value, uint32_t low,
+                          uint32_t high)
+{
+  int ok = ((value >= low) && (value <= high));
+
+  app_log_printf("ADC HC %-10s raw=%-4lu band=%lu..%lu %s\r\n", name,
+                 (unsigned long)value, (unsigned long)low,
+                 (unsigned long)high, (ok != 0) ? "PASS" : "FAIL");
+  return (ok != 0) ? 0 : 1;
+}
+
+int app_acq_hwcheck(void)
+{
+  uint32_t vref = 0U;
+  uint32_t ts = 0U;
+  uint32_t vbat = 0U;
+  uint32_t lo = 0U;
+  uint32_t mid = 0U;
+  uint32_t hi = 0U;
+  uint32_t vdda_mv = 0U;
+  int fails = 0;
+  int rc;
+
+  if (acq_running != 0U)
+  {
+    app_log_printf("ADC HC SKIP reason=acq-running\r\n");
+    return -1;
+  }
+
+  app_log_printf("ADC HC begin\r\n");
+
+  /* Step 1: the converter's own references. These do not touch a pad, so they
+     separate "converter broken" from "input path broken". */
+  rc = app_acq_one_shot(ADC_CHANNEL_VREFINT, 16U, &vref);
+  if (rc == 0)
+  {
+    fails += acq_check_band("vrefint", vref, 1350U, 1580U);
+    vdda_mv = (uint32_t)((1210ULL * 4095ULL) / (uint64_t)((vref != 0U) ? vref : 1U));
+    app_log_printf("ADC HC vdda_mv=%lu\r\n", (unsigned long)vdda_mv);
+  }
+  else
+  {
+    fails++;
+    app_log_printf("ADC HC vrefint rc=%d FAIL\r\n", rc);
+  }
+
+  rc = app_acq_one_shot(ADC_CHANNEL_TEMPSENSOR, 16U, &ts);
+  fails += (rc == 0) ? acq_check_band("temp", ts, 350U, 1150U) : 1;
+  if (rc != 0)
+  {
+    app_log_printf("ADC HC temp rc=%d FAIL\r\n", rc);
+  }
+
+  rc = app_acq_one_shot(ADC_CHANNEL_VBAT, 16U, &vbat);
+  fails += (rc == 0) ? acq_check_band("vbat", vbat, 500U, 1000U) : 1;
+  if (rc != 0)
+  {
+    app_log_printf("ADC HC vbat rc=%d FAIL\r\n", rc);
+  }
+
+  /* Step 2: drive a pad from the on-chip DAC and read it back on the same pin.
+     No jumper wires: if the input path works the reading follows the code. */
+  if ((app_acq_dac_loopback(0U, &lo) != 0) ||
+      (app_acq_dac_loopback(2048U, &mid) != 0) ||
+      (app_acq_dac_loopback(4095U, &hi) != 0))
+  {
+    fails++;
+    app_log_printf("ADC HC loopback rc=fail FAIL\r\n");
+  }
+  else
+  {
+    fails += acq_check_band("dac0", lo, 0U, 400U);
+    fails += acq_check_band("dac2048", mid, 1650U, 2450U);
+    fails += acq_check_band("dac4095", hi, 3700U, 4095U);
+
+    if ((lo < mid) && (mid < hi))
+    {
+      app_log_printf("ADC HC loopback monotonic PASS (%lu < %lu < %lu)\r\n",
+                     (unsigned long)lo, (unsigned long)mid, (unsigned long)hi);
+    }
+    else
+    {
+      fails++;
+      app_log_printf("ADC HC loopback monotonic FAIL (%lu, %lu, %lu)\r\n",
+                     (unsigned long)lo, (unsigned long)mid, (unsigned long)hi);
+    }
+  }
+
+  app_log_printf("ADC HC %s failures=%d\r\n", (fails == 0) ? "PASS" : "FAIL", fails);
+  if (fails == 0)
+  {
+    app_log_printf("ADC HC next: connect 3V3->A1(PC0) and GND->A2(PC3), then run \"acq hwcheck ext\"\r\n");
+  }
+  return (fails == 0) ? 0 : -2;
+}
+
+/*
+ * Second half of the health check, with two jumper wires fitted.
+ *
+ * PC0 sits at 3.3 V and PC3 at 0 V, so the four-channel capture must show two
+ * clearly separated bands. A part with a dead input path reports every channel
+ * near mid-scale, and the separation test fails even though each value on its
+ * own looks plausible.
+ */
+int app_acq_hwcheck_ext(void)
+{
+  uint32_t pc0 = 0U;
+  uint32_t pc3 = 0U;
+  int fails = 0;
+  int rc;
+
+  if (acq_running != 0U)
+  {
+    app_log_printf("ADC HC EXT SKIP reason=acq-running\r\n");
+    return -1;
+  }
+
+  app_log_printf("ADC HC EXT begin\r\n");
+
+  /* Direct one-shot reads first: simple, and independent of the DMA path. */
+  rc = app_acq_sample_index(10U, 16U, &pc0);
+  fails += (rc == 0) ? acq_check_band("pc0-3v3", pc0, 3700U, 4095U) : 1;
+  rc = app_acq_sample_index(13U, 16U, &pc3);
+  fails += (rc == 0) ? acq_check_band("pc3-gnd", pc3, 0U, 300U) : 1;
+
+  /* Then the real capture path, so the interleave and de-interleave are
+     exercised with genuine separated levels. */
+  rc = app_acq_set_channels(APP_ACQ_CH_MAX);
+  if (rc != 0)
+  {
+    app_log_printf("ADC HC EXT channels rc=%d FAIL\r\n", rc);
+    fails++;
+  }
+  else
+  {
+    rc = app_acq_start(1, 50000U);
+    if (rc != 0)
+    {
+      app_log_printf("ADC HC EXT start rc=%d FAIL\r\n", rc);
+      fails++;
+    }
+    else
+    {
+      tx_thread_sleep(APP_MS_TO_TICKS(1200));
+      app_acq_stop();
+
+      if (acq_last_record_valid == 0U)
+      {
+        app_log_printf("ADC HC EXT no-window FAIL\r\n");
+        fails++;
+      }
+      else
+      {
+        uint32_t ch0_min = acq_last_record.min[0];
+        uint32_t ch0_max = acq_last_record.max[0];
+        uint32_t ch3_min = acq_last_record.min[3];
+        uint32_t ch3_max = acq_last_record.max[3];
+        uint32_t spread = (ch0_min > ch3_max) ? (ch0_min - ch3_max) : 0U;
+
+        app_log_printf("ADC HC EXT ch0(pc0)=%lu..%lu ch3(pc3)=%lu..%lu gap=%lu\r\n",
+                       (unsigned long)ch0_min, (unsigned long)ch0_max,
+                       (unsigned long)ch3_min, (unsigned long)ch3_max,
+                       (unsigned long)spread);
+        fails += acq_check_band("ch0-min", ch0_min, 3500U, 4095U);
+        fails += acq_check_band("ch3-max", ch3_max, 0U, 600U);
+
+        if (spread >= 2500U)
+        {
+          app_log_printf("ADC HC EXT separation PASS\r\n");
+        }
+        else
+        {
+          fails++;
+          app_log_printf("ADC HC EXT separation FAIL (need >=2500)\r\n");
+        }
+      }
+    }
+  }
+
+  /* Leave one channel selected so a following `acq start irq` still works. */
+  (void)app_acq_set_channels(1U);
+
+  app_log_printf("ADC HC EXT %s failures=%d\r\n",
+                 (fails == 0) ? "PASS" : "FAIL", fails);
+  return (fails == 0) ? 0 : -2;
 }

@@ -175,7 +175,7 @@ void app_console_status(void)
 
 static void console_help(void)
 {
-  app_log_printf("HELP commands: status stack fault wdg log <text> fs <info|ls|format|mount|umount|write|append|read|rm|test|fill|stress> acq <info|target <sim|sd>|start [dma|irq] [hz]|stop|check|selftest|ch [1-4]|demux|level [0-19]|dac [0-4095]> sd <raw|fs> dma <env|test> stall <0|1|2> crash reboot\r\n");
+  app_log_printf("HELP commands: status stack fault wdg log <text> fs <info|ls|format|mount|umount|write|append|read|rm|test|fill|stress> acq <info|hwcheck [ext]|target <sim|sd>|start [dma|irq] [hz]|stop|check|selftest|ch [1-4]|demux|level [0-19]|dac [0-4095]> sd <raw|fs> dma <env|test> stall <0|1|2> crash reboot\r\n");
 }
 
 static void console_fault_report(void)
@@ -283,6 +283,25 @@ static void console_acq(const char *arg)
   if (strcmp(arg, "demux") == 0)
   {
     (void)app_acq_demux_selftest();
+    return;
+  }
+
+  if (strncmp(arg, "hwcheck", 7) == 0)
+  {
+    const char *rest = arg + 7;
+
+    while (*rest == ' ')
+    {
+      rest++;
+    }
+    if (strcmp(rest, "ext") == 0)
+    {
+      (void)app_acq_hwcheck_ext();
+    }
+    else
+    {
+      (void)app_acq_hwcheck();
+    }
     return;
   }
 

@@ -47,6 +47,14 @@ int app_acq_check(void);
    APP_ACQ_TARGET_SD mounts the card first and returns its mount status. */
 int app_acq_set_target(int target);
 const char *app_acq_target_name(void);
+/* Analog front-end health check. The first half needs no wiring: it validates
+   VREFINT/temperature/VBAT and a DAC-driven pad loopback, which distinguishes a
+   dead input path from a dead converter. The "ext" half expects PC0 at 3.3 V
+   and PC3 at 0 V and additionally verifies that the four-channel capture keeps
+   the two levels in clearly separated bands. Both return 0 when everything
+   passed. */
+int app_acq_hwcheck(void);
+int app_acq_hwcheck_ext(void);
 /* 1 when the writer gave up on a repeatedly failing medium. */
 int app_acq_media_gave_up(void);
 
