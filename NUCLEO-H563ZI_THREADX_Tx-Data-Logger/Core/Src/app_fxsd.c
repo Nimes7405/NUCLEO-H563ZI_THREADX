@@ -297,6 +297,7 @@ int app_fxsd_format(uint32_t sectors)
 void app_fxsd_report(void)
 {
   ULONG available = 0UL;
+  ULONG64 available64 = 0ULL;
   UINT status;
 
   app_log_printf("SD fs mounted=%lu part_lba=%lu total_sectors=%lu format_sectors=%lu\r\n",
@@ -309,9 +310,12 @@ void app_fxsd_report(void)
     return;
   }
 
+  /* A 32 GB volume exceeds ULONG, so the 32-bit call alone saturates at
+     0xFFFFFFFF; the 64-bit variant reports the real remaining space. */
   status = fx_media_space_available(&sd_media, &available);
-  app_log_printf("SD fs free_bytes=%lu status=%u bytes_per_sector=%lu spc=%lu\r\n",
-                 (unsigned long)available, (unsigned)status,
+  (void)fx_media_extended_space_available(&sd_media, &available64);
+  app_log_printf("SD fs free_mb=%lu status=%u bytes_per_sector=%lu spc=%lu\r\n",
+                 (unsigned long)(available64 / (1024ULL * 1024ULL)), (unsigned)status,
                  (unsigned long)sd_media.fx_media_bytes_per_sector,
                  (unsigned long)sd_media.fx_media_sectors_per_cluster);
   app_log_printf("SD fs drv reads=%lu writes=%lu sectors_written=%lu\r\n",
