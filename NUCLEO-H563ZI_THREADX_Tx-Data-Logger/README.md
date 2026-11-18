@@ -271,6 +271,29 @@ SD 目标用 1 MB 轮转上限（`APP_ACQ_SD_FILE_MAX_BYTES`），模拟盘仍�
 另外 **MISO 必须开内部上拉**：SPI 模式卡空闲时 DO 是高阻，没有上拉就没有确定
 电平（空闲读 0 而不是 0xFF）。
 
+### SD 通路是真的（验证方法）
+
+怀疑"文件只是写进了 RAM 缓存"时，用拔卡测试可以一锤定音：
+
+1. `sd ls` → 6 个文件（`LOG0000.CSV` 20776 字节 + `F0..F4.TXT`）
+2. **把 TF 卡从卡座里取出** → `sd init rc=-1`、`sd mount rc=-1`、`sd ls count=-1`
+   文件列表完全消失
+3. **插回卡** → 6 个文件全部恢复
+4. `reboot`（软复位清空 RAM 缓存）→ 文件仍在，大小正确，`G.TXT` 读回
+   `lasting-9b`，`free_bytes` 正好少 4096（一个簇）
+
+外加裸块层：`sd wtest 5000..5007` 写 8 个扇区后逐字节比对，全部
+`mismatches=0`。
+
+### 又一个会丢数据的坑：文件操作后必须 flush 媒体
+
+拔卡插回后发现 `F4.TXT` 从 9 字节变成 **0 字节**。原因是 `sd put` / `sd rm`
+只做了 `fx_file_close()`，此时**目录项（含文件大小）还留在 FileX 的媒体缓存里**，
+掉电或复位就丢了。
+
+修复：`app_fxsd_write_file()` 和 `app_fxsd_delete()` 结束前都调用
+`fx_media_flush(&sd_media)`。采集路径不受影响，因为 writer 每批都 flush。
+
 ### 接入 FileX 时踩的坑
 
 1. **分区偏移**：PC 写过的卡 0 号扇区是 MBR，而 FileX 直接读 0 号扇区当引导扇区。

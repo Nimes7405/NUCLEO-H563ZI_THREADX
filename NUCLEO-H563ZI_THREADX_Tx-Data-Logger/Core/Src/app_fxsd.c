@@ -390,6 +390,9 @@ int app_fxsd_write_file(const char *name, const char *text, int append)
 
   status = fx_file_write(&file, (VOID *)text, (ULONG)strlen(text));
   (void)fx_file_close(&file);
+  /* The directory entry (including the file size) is still only in the media
+     cache at this point; without the flush a power cycle shows size 0. */
+  (void)fx_media_flush(&sd_media);
   return (status == FX_SUCCESS) ? 0 : (int)status;
 }
 
@@ -551,5 +554,10 @@ int app_fxsd_delete(const char *name)
   {
     return -1;
   }
-  return (fx_file_delete(&sd_media, (CHAR *)name) == FX_SUCCESS) ? 0 : -1;
+  if (fx_file_delete(&sd_media, (CHAR *)name) != FX_SUCCESS)
+  {
+    return -1;
+  }
+  (void)fx_media_flush(&sd_media);
+  return 0;
 }
