@@ -30,7 +30,9 @@ static void console_help(void);
 static void console_acq(const char *arg);
 static void console_dma(const char *arg);
 static void console_fs(const char *arg);
+
 static void console_sd(const char *arg);
+static void console_sd_locked(const char *arg);
 static void console_stall(const char *arg);
 
 void app_console_init(void)
@@ -173,7 +175,7 @@ void app_console_status(void)
 
 static void console_help(void)
 {
-  app_log_printf("HELP commands: status stack fault wdg log <text> fs <info|ls|format|mount|umount|write|append|read|rm|test|fill|stress> acq <info|start [dma|irq] [hz]|stop|check|selftest|ch [1-4]|demux|level [0-19]|dac [0-4095]> sd <raw|fs> dma <env|test> stall <0|1|2> crash reboot\r\n");
+  app_log_printf("HELP commands: status stack fault wdg log <text> fs <info|ls|format|mount|umount|write|append|read|rm|test|fill|stress> acq <info|target <sim|sd>|start [dma|irq] [hz]|stop|check|selftest|ch [1-4]|demux|level [0-19]|dac [0-4095]> sd <raw|fs> dma <env|test> stall <0|1|2> crash reboot\r\n");
 }
 
 static void console_fault_report(void)
@@ -281,6 +283,47 @@ static void console_acq(const char *arg)
   if (strcmp(arg, "demux") == 0)
   {
     (void)app_acq_demux_selftest();
+    return;
+  }
+
+  if (strncmp(arg, "target", 6) == 0)
+  {
+    const char *rest = arg + 6;
+
+    while (*rest == ' ')
+    {
+      rest++;
+    }
+
+    if (*rest == '\0')
+    {
+      app_log_printf("ACQ target=%s\r\n", app_acq_target_name());
+      return;
+    }
+
+    {
+      int target;
+
+      if (strcmp(rest, "sd") == 0)
+      {
+        target = APP_ACQ_TARGET_SD;
+      }
+      else if (strcmp(rest, "sim") == 0)
+      {
+        target = APP_ACQ_TARGET_SIM;
+      }
+      else
+      {
+        app_log_printf("ERR usage: acq target <sim|sd>\r\n");
+        return;
+      }
+
+      {
+        int rc = app_acq_set_target(target);
+
+        app_log_printf("ACQ target=%s rc=%d\r\n", app_acq_target_name(), rc);
+      }
+    }
     return;
   }
 
@@ -618,9 +661,26 @@ static void console_fs(const char *arg)
   (void)app_fxdisk_unlock();
 }
 
-/* Raw SPI-mode SD access, used to prove the card and the wiring before FileX
-   is layered on top. */
+/*
+ * Every SD operation runs under the same mutex the acquisition writer uses.
+ * Without it a raw `sd` command and the writer can interleave on SPI1, and a
+ * command torn in half puts the card into a state that only a power cycle
+ * clears.
+ */
 static void console_sd(const char *arg)
+{
+  if (app_fxsd_lock() != 0)
+  {
+    app_log_printf("ERR sd-busy\r\n");
+    return;
+  }
+  console_sd_locked(arg);
+  (void)app_fxsd_unlock();
+}
+
+/* Raw SPI-mode SD access, used to prove the card and the wiring before FileX
+   is layered on top. Runs with the SD mutex already held. */
+static void console_sd_locked(const char *arg)
 {
   static uint8_t block[APP_SD_BLOCK_SIZE];
 

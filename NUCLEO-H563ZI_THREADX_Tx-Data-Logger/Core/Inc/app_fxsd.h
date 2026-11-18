@@ -19,6 +19,8 @@ int app_fxsd_lock(void);
 int app_fxsd_unlock(void);
 
 int app_fxsd_is_mounted(void);
+/* 0 when a volume is mounted, mirroring app_fxdisk_ready(). */
+int app_fxsd_mounted_ready(void);
 int app_fxsd_mount(void);
 int app_fxsd_unmount(void);
 /* Destroys the card's partition table: the volume starts at sector 0. */
@@ -29,5 +31,16 @@ int app_fxsd_list(void);
 int app_fxsd_write_file(const char *name, const char *text, int append);
 int app_fxsd_read_file(const char *name, char *out, uint32_t max, uint32_t *out_len);
 int app_fxsd_delete(const char *name);
+
+/* Sequential log interface, same shape as app_fxdisk's, so the acquisition
+   writer can target either medium. */
+int app_fxsd_log_open(const char *name);
+int app_fxsd_log_write(const void *data, uint32_t len);
+int app_fxsd_log_close(void);
+int app_fxsd_log_flush(void);
+int app_fxsd_log_size(uint32_t *size);
+typedef int (*app_fxsd_chunk_fn)(const char *data, uint32_t len, void *ctx);
+int app_fxsd_read_stream(const char *name, app_fxsd_chunk_fn fn, void *ctx,
+                         uint32_t *total);
 
 #endif

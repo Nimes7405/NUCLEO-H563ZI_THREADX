@@ -1,6 +1,7 @@
 #include "app_acq.h"
 #include "app_config.h"
 #include "app_fxdisk.h"
+#include "app_fxsd.h"
 #include "app_log.h"
 #include "app_watchdog.h"
 
@@ -103,6 +104,56 @@ typedef struct
   uint32_t max[APP_ACQ_CH_MAX];
   uint32_t avg[APP_ACQ_CH_MAX];
 } acq_record_t;
+
+/*
+ * The window writer is the same either way; only the medium differs, so the
+ * two FileX volumes are hidden behind this small operation table. The simulated
+ * NOR disk stays the default because it needs no card.
+ */
+typedef int (*acq_chunk_fn)(const char *data, uint32_t len, void *ctx);
+
+typedef struct
+{
+  const char *name;
+  int (*ready)(void);
+  int (*lock)(void);
+  int (*unlock)(void);
+  int (*log_open)(const char *name);
+  int (*log_write)(const void *data, uint32_t len);
+  int (*log_close)(void);
+  int (*log_flush)(void);
+  int (*log_size)(uint32_t *size);
+  int (*read_stream)(const char *name, acq_chunk_fn fn, void *ctx, uint32_t *total);
+} acq_media_ops_t;
+
+static const acq_media_ops_t acq_media_sim = {
+    "sim",
+    app_fxdisk_ready,
+    app_fxdisk_lock,
+    app_fxdisk_unlock,
+    app_fxdisk_log_open,
+    app_fxdisk_log_write,
+    app_fxdisk_log_close,
+    app_fxdisk_log_flush,
+    app_fxdisk_log_size,
+    (int (*)(const char *, acq_chunk_fn, void *, uint32_t *))app_fxdisk_read_stream,
+};
+
+static const acq_media_ops_t acq_media_sd = {
+    "sd",
+    app_fxsd_mounted_ready,
+    app_fxsd_lock,
+    app_fxsd_unlock,
+    app_fxsd_log_open,
+    app_fxsd_log_write,
+    app_fxsd_log_close,
+    app_fxsd_log_flush,
+    app_fxsd_log_size,
+    (int (*)(const char *, acq_chunk_fn, void *, uint32_t *))app_fxsd_read_stream,
+};
+
+static const acq_media_ops_t *acq_media = &acq_media_sim;
+static uint32_t acq_file_max_bytes = APP_ACQ_FILE_MAX_BYTES;
 
 static TX_QUEUE acq_queue;
 static ULONG acq_queue_mem[ACQ_QUEUE_DEPTH * (sizeof(acq_record_t) / sizeof(ULONG))];
@@ -461,7 +512,7 @@ static int acq_open_file(void)
   snprintf(acq_current, sizeof(acq_current), "LOG%04lu.CSV",
            (unsigned long)(acq_file_index % APP_ACQ_FILE_KEEP));
 
-  rc = app_fxdisk_log_open(acq_current);
+  rc = acq_media->log_open(acq_current);
   if (rc != 0)
   {
     return rc;
@@ -481,7 +532,7 @@ int app_acq_start(int use_dma, uint32_t hz)
   {
     return -1;
   }
-  if (app_fxdisk_ready() != 0)
+  if (acq_media->ready() != 0)
   {
     return -2;
   }
@@ -529,16 +580,16 @@ int app_acq_start(int use_dma, uint32_t hz)
     }
   }
 
-  if (app_fxdisk_lock() != 0)
+  if (acq_media->lock() != 0)
   {
     return -3;
   }
   if (acq_open_file() != 0)
   {
-    (void)app_fxdisk_unlock();
+    (void)acq_media->unlock();
     return -3;
   }
-  (void)app_fxdisk_unlock();
+  (void)acq_media->unlock();
 
   acq_mode = (use_dma != 0) ? ACQ_MODE_DMA : ACQ_MODE_IRQ;
 
@@ -549,9 +600,9 @@ int app_acq_start(int use_dma, uint32_t hz)
     if (acq_dma_setup() != 0)
     {
       acq_mode = ACQ_MODE_IRQ;
-      (void)app_fxdisk_lock();
-      (void)app_fxdisk_log_close();
-      (void)app_fxdisk_unlock();
+      (void)acq_media->lock();
+      (void)acq_media->log_close();
+      (void)acq_media->unlock();
       return -7;
     }
 
@@ -575,17 +626,17 @@ int app_acq_start(int use_dma, uint32_t hz)
                           2U * acq_dma_half) != HAL_OK)
     {
       acq_mode = ACQ_MODE_IRQ;
-      (void)app_fxdisk_lock();
-      (void)app_fxdisk_log_close();
-      (void)app_fxdisk_unlock();
+      (void)acq_media->lock();
+      (void)acq_media->log_close();
+      (void)acq_media->unlock();
       return -4;
     }
   }
   else if (HAL_ADC_Start_IT(&hadc1) != HAL_OK)
   {
-    (void)app_fxdisk_lock();
-    (void)app_fxdisk_log_close();
-    (void)app_fxdisk_unlock();
+    (void)acq_media->lock();
+    (void)acq_media->log_close();
+    (void)acq_media->unlock();
     return -4;
   }
 
@@ -599,9 +650,9 @@ int app_acq_start(int use_dma, uint32_t hz)
     {
       (void)HAL_ADC_Stop_IT(&hadc1);
     }
-    (void)app_fxdisk_lock();
-    (void)app_fxdisk_log_close();
-    (void)app_fxdisk_unlock();
+    (void)acq_media->lock();
+    (void)acq_media->log_close();
+    (void)acq_media->unlock();
     return -5;
   }
 
@@ -670,12 +721,12 @@ static int acq_write_record(const acq_record_t *rec)
   len = snprintf(&line[pos], sizeof(line) - (size_t)pos, "\r\n");
   pos += (len > 0) ? len : 0;
 
-  if (app_fxdisk_log_write(line, (uint32_t)pos) != 0)
+  if (acq_media->log_write(line, (uint32_t)pos) != 0)
   {
     return -1;
   }
 
-  if ((app_fxdisk_log_size(&size) == 0) && (size >= APP_ACQ_FILE_MAX_BYTES))
+  if ((acq_media->log_size(&size) == 0) && (size >= acq_file_max_bytes))
   {
     if (acq_open_file() != 0)
     {
@@ -786,7 +837,7 @@ static void acq_drain_and_close(void)
 {
   acq_record_t rec;
 
-  if (app_fxdisk_lock() != 0)
+  if (acq_media->lock() != 0)
   {
     return;
   }
@@ -794,8 +845,8 @@ static void acq_drain_and_close(void)
   {
     (void)acq_write_record(&rec);
   }
-  (void)app_fxdisk_log_close();
-  (void)app_fxdisk_unlock();
+  (void)acq_media->log_close();
+  (void)acq_media->unlock();
 }
 
 /* Writer thread: drains the queue in batches and flushes once per batch. */
@@ -809,7 +860,7 @@ void app_acq_writer_entry(unsigned long thread_input)
 
     acq_record_t rec;
     uint32_t lines = 0U;
-    int locked = (app_fxdisk_lock() == 0);
+    int locked = (acq_media->lock() == 0);
 
     if (locked)
     {
@@ -823,10 +874,10 @@ void app_acq_writer_entry(unsigned long thread_input)
       }
       if (lines > 0U)
       {
-        (void)app_fxdisk_log_flush();
+        (void)acq_media->log_flush();
         acq_flush_batches++;
       }
-      (void)app_fxdisk_unlock();
+      (void)acq_media->unlock();
     }
 
     tx_thread_sleep(ACQ_WRITE_PERIOD_TICKS);
@@ -932,9 +983,10 @@ int app_acq_demux_selftest(void)
 
 void app_acq_report(void)
 {
-  app_log_printf("ACQ running=%d mode=%s rate=%lu ch=%lu file=%s windows=%lu samples=%lu files=%lu min=%lu max=%lu drop=%lu dma_ovr=%lu qdrop=%lu flush=%lu\r\n",
+  app_log_printf("ACQ running=%d mode=%s target=%s rate=%lu ch=%lu file=%s windows=%lu samples=%lu files=%lu min=%lu max=%lu drop=%lu dma_ovr=%lu qdrop=%lu flush=%lu\r\n",
                  (int)acq_running,
                  (acq_mode == ACQ_MODE_DMA) ? "dma" : "irq",
+                 acq_media->name,
                  (unsigned long)acq_rate_hz,
                  (unsigned long)acq_eval_channels,
                  (acq_current[0] != '\0') ? acq_current : "-",
@@ -1088,7 +1140,7 @@ int app_acq_check(void)
 
   memset(&ctx, 0, sizeof(ctx));
 
-  if (app_fxdisk_lock() != 0)
+  if (acq_media->lock() != 0)
   {
     return -9;
   }
@@ -1096,15 +1148,15 @@ int app_acq_check(void)
   if (acq_current[0] == '\0')
   {
     app_log_printf("ACQ CHECK FAIL reason=no-file\r\n");
-    (void)app_fxdisk_unlock();
+    (void)acq_media->unlock();
     return -1;
   }
 
   /* Flush first: the writer batches, so the tail of the file may still be in
      the media cache. */
-  (void)app_fxdisk_log_flush();
+  (void)acq_media->log_flush();
 
-  rc = app_fxdisk_read_stream(acq_current, acq_parse_chunk, &ctx, &total);
+  rc = acq_media->read_stream(acq_current, (acq_chunk_fn)acq_parse_chunk, &ctx, &total);
   if ((ctx.used > 0U) && (rc == 0))
   {
     acq_feed_line(&ctx);
@@ -1125,7 +1177,7 @@ int app_acq_check(void)
     result = 0;
   }
 
-  (void)app_fxdisk_unlock();
+  (void)acq_media->unlock();
   return result;
 }
 
@@ -1460,4 +1512,45 @@ int app_acq_dac_loopback(uint32_t code, uint32_t *raw)
   (void)HAL_DAC_DeInit(&hdac1);
   __HAL_RCC_DAC1_CLK_DISABLE();
   return rc;
+}
+
+/* Pick the medium the window writer logs to. Refused while a capture runs. */
+int app_acq_set_target(int target)
+{
+  if (acq_running != 0U)
+  {
+    return -2;
+  }
+
+  if (target == APP_ACQ_TARGET_SD)
+  {
+    int rc;
+
+    if (app_fxsd_lock() != 0)
+    {
+      return -1;
+    }
+    rc = app_fxsd_mount();
+    (void)app_fxsd_unlock();
+
+    if (rc != 0)
+    {
+      return rc;
+    }
+    acq_media = &acq_media_sd;
+    /* A card has room for a lot more than the simulated disk, and rotating
+       every 4 KB would cost a file create per second at high rates. */
+    acq_file_max_bytes = APP_ACQ_SD_FILE_MAX_BYTES;
+  }
+  else
+  {
+    acq_media = &acq_media_sim;
+    acq_file_max_bytes = APP_ACQ_FILE_MAX_BYTES;
+  }
+  return 0;
+}
+
+const char *app_acq_target_name(void)
+{
+  return acq_media->name;
 }

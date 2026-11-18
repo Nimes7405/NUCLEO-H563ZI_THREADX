@@ -91,7 +91,9 @@ void HAL_SPI_MspInit(SPI_HandleTypeDef *hspi)
     gpio.Pin = GPIO_PIN_5;
     HAL_GPIO_Init(GPIOB, &gpio);
 
-    gpio.Pull = GPIO_NOPULL;
+    /* SPI-mode cards leave DO high-Z between transfers, so the pull-up is
+       what gives MISO a defined idle level (0xFF). */
+    gpio.Pull = GPIO_PULLUP;
     gpio.Pin = GPIO_PIN_9;
     HAL_GPIO_Init(GPIOG, &gpio);
 

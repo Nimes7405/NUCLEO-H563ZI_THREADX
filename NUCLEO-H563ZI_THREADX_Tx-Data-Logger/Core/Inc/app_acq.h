@@ -10,6 +10,11 @@
 #define APP_ACQ_WINDOW_FRAMES   500U
 #define APP_ACQ_FILE_MAX_BYTES  4096U
 #define APP_ACQ_FILE_KEEP       4U
+/* Rotation limit on a real card, where space is not the constraint. */
+#define APP_ACQ_SD_FILE_MAX_BYTES  (1024U * 1024U)
+
+#define APP_ACQ_TARGET_SIM      0
+#define APP_ACQ_TARGET_SD       1
 
 void app_acq_system_init(void);
 void app_acq_init(void);
@@ -38,5 +43,9 @@ void app_acq_level_report(uint32_t adc_channel_number, int have_channel);
 /* Diagnostic: DAC1_OUT1 (PA4) -> ADC1_INP18 loopback on the same pad. */
 int app_acq_dac_loopback(uint32_t code, uint32_t *raw);
 int app_acq_check(void);
+/* Select where window records are logged. Refused while capturing.
+   APP_ACQ_TARGET_SD mounts the card first and returns its mount status. */
+int app_acq_set_target(int target);
+const char *app_acq_target_name(void);
 
 #endif

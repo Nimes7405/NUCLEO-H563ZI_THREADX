@@ -220,6 +220,57 @@ FAT/根目录最终没有正确落盘。
 （`part_lba=64`、`total_sectors=61067200`），文件创建/读写/删除都正常。所以推荐的
 用法是：**在 PC 上把卡格式化成 FAT32，板子只负责挂载和读写**。
 
+### 采集落盘到 SD 卡
+
+writer 线程不再绑死模拟盘，两个介质藏在同一张操作表后面（`app_acq.c` 的
+`acq_media_ops_t`），`acq target sim|sd` 切换，默认仍是模拟盘（不需要插卡）。
+
+```text
+acq target sd            ACQ target=sd rc=0
+acq ch 4
+acq start dma 50000      ACQ start=ok mode=dma rc=0
+（3 秒）
+acq stop                 windows=354 samples=708000 files=1
+                         drop=0 dma_ovr=0 qdrop=0 flush=57
+acq check                ACQ CHECK PASS file=LOG0000.CSV lines=354
+                         channels=4 samples=708000 bytes=20776
+sd ls                    SD f=LOG0000.CSV size=20776
+```
+
+卡上的行长这样（数值是浮空噪声，因为片内 ADC 的外部件坏了，但格式正确）：
+
+```text
+0,500,4,518,912,641,547,721,645,419,704,644,351,724,643
+ │  │  │  └─ch0─┘ └─ch1─┘ └─ch2─┘ └─ch3─┘
+ │  │  └─ 通道数
+ │  └─ 每窗帧数
+ └─ 窗口序号
+```
+
+SD 目标用 1 MB 轮转上限（`APP_ACQ_SD_FILE_MAX_BYTES`），模拟盘仍是 4 KB：
+4 KB 在卡上意味着每秒建一个新文件。
+
+顺带验证了持久化：采集中途拔掉 USB 再插回，`sd ls` 里 `LOG0000.CSV`（20776 字节）
+依然完整——writer 每批都 flush，已落盘的数据不受掉电影响。
+
+### 把卡写进"只能断电才能恢复"状态的三个原因
+
+接 SD 之后有一段反复翻车：卡会突然对所有命令返回 0xFF，只有拔电才能恢复。
+三个原因叠在一起，现在都修了：
+
+1. **`sd` 命令没和 writer 共用互斥锁**。`acq target sd` 之后采集在跑，此时敲
+   `sd xxx` 会让 console 和 writer 同时操作 SPI1，命令被切断就把卡写进异常态。
+   现在 `console_sd()` 是薄封装，进函数先拿 `app_fxsd_lock()`，和 writer 同一把锁。
+2. **写块失败时过早释放 CS**。卡在编程期间若丢掉片选，会一直拉低 DO 并忽略后续
+   命令（`sd pins` 会看到 `miso=0` 且内部上拉拉不动）。现在无论 data response
+   是否正确，都先等 busy 结束再拉高 CS。
+3. **逐字节传输太慢**。512 字节一次一个字节地传，writer 被更高优先级的 sampler
+   线程抢占时字节间隔被拉长，卡超时放弃整块。现在整块走一次
+   `HAL_SPI_TransmitReceive`，格式化时间也从 2.1 s 降到 1.2 s。
+
+另外 **MISO 必须开内部上拉**：SPI 模式卡空闲时 DO 是高阻，没有上拉就没有确定
+电平（空闲读 0 而不是 0xFF）。
+
 ### 接入 FileX 时踩的坑
 
 1. **分区偏移**：PC 写过的卡 0 号扇区是 MBR，而 FileX 直接读 0 号扇区当引导扇区。

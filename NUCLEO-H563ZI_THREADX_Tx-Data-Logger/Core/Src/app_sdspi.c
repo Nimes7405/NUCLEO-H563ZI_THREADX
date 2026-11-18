@@ -24,8 +24,9 @@
 
 #define SD_CMD_TIMEOUT_MS  500U
 #define SD_SPI_XFER_MS     5U
+#define SD_BLOCK_TIMEOUT_MS 250U
 #define SD_DATA_TIMEOUT_MS 2000U
-#define SD_INIT_RETRIES    3U
+#define SD_INIT_RETRIES    5U
 
 /* R1 status bits */
 #define SD_R1_IDLE         0x01U
@@ -412,6 +413,11 @@ int app_sdspi_init(void)
     {
       break;
     }
+    /* A card that answered nothing keeps the previous attempt's clocks on the
+       bus, so let it settle for well over the 74 clocks the spec requires. */
+    sd_cs(1);
+    sd_clock_idle(16U);
+    HAL_Delay(20U);
     /* A failed attempt leaves the card in an unknown state; a fresh CMD0
        inside the sequence resets it, so just retry. */
     HAL_Delay(5U);
@@ -679,9 +685,17 @@ int app_sdspi_read_block(uint32_t lba, uint8_t *buf)
     return -3;
   }
 
-  for (uint32_t i = 0U; i < APP_SD_BLOCK_SIZE; i++)
+  /* One transfer for the whole block: the card times out if a preempted
+     writer leaves long gaps between bytes. */
   {
-    buf[i] = sd_xfer(0xFFU);
+    static uint8_t fill[APP_SD_BLOCK_SIZE];
+
+    for (uint32_t i = 0U; i < APP_SD_BLOCK_SIZE; i++)
+    {
+      fill[i] = 0xFFU;
+    }
+    (void)HAL_SPI_TransmitReceive(&hspi1_sd, fill, buf, APP_SD_BLOCK_SIZE,
+                                  SD_BLOCK_TIMEOUT_MS);
   }
   (void)sd_xfer(0xFFU);   /* CRC, not checked in SPI mode */
   (void)sd_xfer(0xFFU);
@@ -713,33 +727,41 @@ int app_sdspi_write_block(uint32_t lba, const uint8_t *buf)
   (void)sd_xfer(0xFFU);      /* one gap byte before the start token */
   (void)sd_xfer(0xFEU);      /* start block token */
 
-  for (uint32_t i = 0U; i < APP_SD_BLOCK_SIZE; i++)
   {
-    (void)sd_xfer(buf[i]);
+    static uint8_t sink[APP_SD_BLOCK_SIZE];
+
+    (void)HAL_SPI_TransmitReceive(&hspi1_sd, (uint8_t *)buf, sink,
+                                  APP_SD_BLOCK_SIZE, SD_BLOCK_TIMEOUT_MS);
   }
   (void)sd_xfer(0xFFU);      /* CRC is ignored by the card in SPI mode */
   (void)sd_xfer(0xFFU);
 
   data_response = sd_xfer(0xFFU);
-  if ((data_response & 0x1FU) != 0x05U)
-  {
-    sd_cs(1);
-    (void)sd_xfer(0xFFU);
-    return -3;
-  }
 
-  /* The card holds the bus while it programs the block. */
-  start = HAL_GetTick();
-  while (sd_xfer(0xFFU) == 0U)
+  /*
+   * Wait for the card to finish programming before releasing CS, even when the
+   * data response looks wrong. Dropping CS while the card is still busy leaves
+   * it holding DO low, and from then on it ignores every command until the
+   * supply is cycled.
+   */
   {
-    if ((HAL_GetTick() - start) > SD_DATA_TIMEOUT_MS)
+    uint32_t busy_start = HAL_GetTick();
+
+    while (sd_xfer(0xFFU) == 0U)
     {
-      sd_cs(1);
-      (void)sd_xfer(0xFFU);
-      return -4;
+      if ((HAL_GetTick() - busy_start) > SD_DATA_TIMEOUT_MS)
+      {
+        break;
+      }
     }
   }
   sd_cs(1);
   (void)sd_xfer(0xFFU);
+  (void)start;
+
+  if ((data_response & 0x1FU) != 0x05U)
+  {
+    return -3;
+  }
   return 0;
 }

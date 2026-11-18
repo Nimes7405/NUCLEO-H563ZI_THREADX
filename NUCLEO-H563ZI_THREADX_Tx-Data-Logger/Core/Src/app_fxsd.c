@@ -9,6 +9,8 @@
 #include <string.h>
 
 static FX_MEDIA sd_media;
+static FX_FILE sd_log_file;
+static uint32_t sd_log_open;
 static uint8_t sd_media_memory[1024];
 static TX_MUTEX sd_mutex;
 static uint32_t sd_mounted;
@@ -194,6 +196,12 @@ static VOID app_fxsd_driver(FX_MEDIA *media_ptr)
       media_ptr->fx_media_driver_status = FX_IO_ERROR;
       break;
   }
+}
+
+/* Same contract as app_fxdisk_ready(): 0 means "usable". */
+int app_fxsd_mounted_ready(void)
+{
+  return (sd_mounted != 0U) ? 0 : -1;
 }
 
 int app_fxsd_is_mounted(void)
@@ -415,6 +423,126 @@ int app_fxsd_read_file(const char *name, char *out, uint32_t max, uint32_t *out_
     *out_len = (uint32_t)got;
   }
   return 0;
+}
+
+/* ---- sequential log interface, mirroring app_fxdisk's ---- */
+
+int app_fxsd_log_open(const char *name)
+{
+  UINT status;
+
+  if ((sd_mounted == 0U) || (name == NULL))
+  {
+    return -1;
+  }
+  (void)app_fxsd_log_close();
+
+  status = fx_file_create(&sd_media, (CHAR *)name);
+  if ((status != FX_SUCCESS) && (status != FX_ALREADY_CREATED))
+  {
+    return (int)status;
+  }
+
+  status = fx_file_open(&sd_media, &sd_log_file, (CHAR *)name, FX_OPEN_FOR_WRITE);
+  if (status != FX_SUCCESS)
+  {
+    return (int)status;
+  }
+
+  sd_log_open = 1U;
+  (void)fx_file_truncate(&sd_log_file, 0UL);
+  return 0;
+}
+
+int app_fxsd_log_write(const void *data, uint32_t len)
+{
+  if (sd_log_open == 0U)
+  {
+    return -1;
+  }
+  return (fx_file_write(&sd_log_file, (VOID *)data, (ULONG)len) == FX_SUCCESS) ? 0 : -2;
+}
+
+int app_fxsd_log_close(void)
+{
+  if (sd_log_open == 0U)
+  {
+    return 0;
+  }
+
+  (void)fx_file_close(&sd_log_file);
+  (void)fx_media_flush(&sd_media);
+  sd_log_open = 0U;
+  return 0;
+}
+
+int app_fxsd_log_flush(void)
+{
+  if (sd_log_open == 0U)
+  {
+    return -1;
+  }
+  return (fx_media_flush(&sd_media) == FX_SUCCESS) ? 0 : -2;
+}
+
+int app_fxsd_log_size(uint32_t *size)
+{
+  if ((sd_log_open == 0U) || (size == NULL))
+  {
+    return -1;
+  }
+  *size = (uint32_t)sd_log_file.fx_file_current_file_size;
+  return 0;
+}
+
+int app_fxsd_read_stream(const char *name, app_fxsd_chunk_fn fn, void *ctx,
+                         uint32_t *total)
+{
+  static UCHAR chunk[256];
+  FX_FILE file;
+  UINT status;
+  ULONG actual = 0UL;
+  uint32_t sum = 0U;
+
+  if ((sd_mounted == 0U) || (name == NULL))
+  {
+    return -1;
+  }
+
+  status = fx_file_open(&sd_media, &file, (CHAR *)name, FX_OPEN_FOR_READ);
+  if (status != FX_SUCCESS)
+  {
+    return (int)status;
+  }
+
+  do
+  {
+    status = fx_file_read(&file, chunk, (ULONG)sizeof(chunk), &actual);
+    if ((status != FX_SUCCESS) || (actual == 0UL))
+    {
+      break;
+    }
+    if (fn != NULL)
+    {
+      if (fn((const char *)chunk, (uint32_t)actual, ctx) != 0)
+      {
+        (void)fx_file_close(&file);
+        return -2;
+      }
+    }
+    sum += (uint32_t)actual;
+  } while (actual > 0UL);
+
+  (void)fx_file_close(&file);
+  if (total != NULL)
+  {
+    *total = sum;
+  }
+  if ((status == FX_SUCCESS) || (status == FX_END_OF_FILE))
+  {
+    return 0;
+  }
+  return (int)status;
 }
 
 int app_fxsd_delete(const char *name)
