@@ -22,10 +22,10 @@
 #define SD_SPI_PRESC_INIT  SPI_BAUDRATEPRESCALER_256   /* 64 MHz per_ck / 256 = 250 kHz */
 #define SD_SPI_PRESC_DATA  SPI_BAUDRATEPRESCALER_128   /* 250 MHz / 128 = 1.95 MHz */
 
-#define SD_CMD_TIMEOUT_MS  500U
-#define SD_SPI_XFER_MS     5U
-#define SD_BLOCK_TIMEOUT_MS 250U
-#define SD_DATA_TIMEOUT_MS 2000U
+#define SD_CMD_TIMEOUT_MS  100U
+#define SD_SPI_XFER_MS     2U
+#define SD_BLOCK_TIMEOUT_MS 60U
+#define SD_DATA_TIMEOUT_MS 250U
 #define SD_INIT_RETRIES    5U
 
 /* R1 status bits */
@@ -44,6 +44,9 @@ static uint32_t sd_hal_status;
 static uint32_t sd_hal_error;
 static uint32_t sd_spi_prescaler = SD_SPI_PRESC_INIT;
 static uint32_t sd_csd_token = 0xEEU;
+static volatile uint32_t sd_err_op;      /* which step failed last */
+static volatile uint32_t sd_err_code;    /* R1 or token seen */
+static volatile uint32_t sd_err_lba;
 static uint32_t csd_token_seen;
 
 static void sd_cs(int level)
@@ -101,7 +104,9 @@ static uint8_t sd_wait_data_token(uint32_t timeout_ms)
     {
       return 0xFEU;
     }
-    if ((value & 0xF0U) == 0x00U)
+    /* 0x00 is the card still holding DO low while it finishes programming;
+       only 0x01..0x0F are data error tokens. */
+    if (((value & 0xF0U) == 0x00U) && (value != 0x00U))
     {
       return value;
     }
@@ -672,6 +677,7 @@ int app_sdspi_read_block(uint32_t lba, uint8_t *buf)
   {
     sd_cs(1);
     (void)sd_xfer(0xFFU);
+    sd_err_op = 1U; sd_err_code = r1; sd_err_lba = lba;
     app_log_printf("SD CMD17 r1=%02x\r\n", r1);
     return -2;
   }
@@ -681,6 +687,7 @@ int app_sdspi_read_block(uint32_t lba, uint8_t *buf)
   {
     sd_cs(1);
     (void)sd_xfer(0xFFU);
+    sd_err_op = 2U; sd_err_code = token; sd_err_lba = lba;
     app_log_printf("SD token=%02x\r\n", token);
     return -3;
   }
@@ -720,6 +727,7 @@ int app_sdspi_write_block(uint32_t lba, const uint8_t *buf)
   {
     sd_cs(1);
     (void)sd_xfer(0xFFU);
+    sd_err_op = 3U; sd_err_code = r1; sd_err_lba = lba;
     app_log_printf("SD CMD24 r1=%02x\r\n", r1);
     return -2;
   }
@@ -761,7 +769,16 @@ int app_sdspi_write_block(uint32_t lba, const uint8_t *buf)
 
   if ((data_response & 0x1FU) != 0x05U)
   {
+    sd_err_op = 4U; sd_err_code = data_response; sd_err_lba = lba;
     return -3;
   }
   return 0;
+}
+
+/* Last block-level failure, for the acquisition writer to report. */
+void app_sdspi_last_error(uint32_t *op, uint32_t *code, uint32_t *lba)
+{
+  if (op != NULL) { *op = sd_err_op; }
+  if (code != NULL) { *code = sd_err_code; }
+  if (lba != NULL) { *lba = sd_err_lba; }
 }

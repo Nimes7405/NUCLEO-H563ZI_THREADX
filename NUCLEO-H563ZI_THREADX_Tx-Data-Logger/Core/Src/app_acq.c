@@ -3,6 +3,7 @@
 #include "app_fxdisk.h"
 #include "app_fxsd.h"
 #include "app_log.h"
+#include "app_sdspi.h"
 #include "app_watchdog.h"
 
 #include <stdio.h>
@@ -36,6 +37,14 @@ typedef char acq_ring_fit_check[(ACQ_RING_SAMPLES >=
  */
 #define ACQ_DMA_FRAMES_MIN  64U
 #define ACQ_DMA_FRAMES_MAX  1024U
+
+/* A medium that keeps timing out must not stall the writer forever: after this
+   many consecutive failures the writer stops touching it and drops records, so
+   the console and the watchdog stay alive. */
+#define ACQ_MEDIA_ERROR_LIMIT 8U
+
+/* How often the writer pushes the FileX cache to the card. */
+#define ACQ_FLUSH_INTERVAL_MS 100U
 
 #define ACQ_MODE_IRQ        0U
 #define ACQ_MODE_DMA        1U
@@ -159,6 +168,9 @@ static TX_QUEUE acq_queue;
 static ULONG acq_queue_mem[ACQ_QUEUE_DEPTH * (sizeof(acq_record_t) / sizeof(ULONG))];
 static volatile uint32_t acq_windows_dropped;
 static volatile uint32_t acq_flush_batches;
+static volatile uint32_t acq_media_errors;
+static volatile uint32_t acq_media_gave_up;
+static uint32_t acq_last_flush_ms;
 
 typedef struct
 {
@@ -562,6 +574,9 @@ int app_acq_start(int use_dma, uint32_t hz)
   acq_isr_samples = 0U;
   acq_windows_dropped = 0U;
   acq_flush_batches = 0U;
+  acq_media_errors = 0U;
+  acq_media_gave_up = 0U;
+  acq_last_flush_ms = HAL_GetTick();
   acq_eval_channels = acq_channels;
 
   if ((hz != 0U) && (hz != acq_rate_hz))
@@ -723,8 +738,23 @@ static int acq_write_record(const acq_record_t *rec)
 
   if (acq_media->log_write(line, (uint32_t)pos) != 0)
   {
+    acq_media_errors++;
+    if (acq_media_errors <= 3U)
+    {
+      uint32_t op = 0U, code = 0U, lba = 0U;
+
+      app_sdspi_last_error(&op, &code, &lba);
+      app_log_printf("ACQ media-fail n=%lu op=%lu code=%02lx lba=%lu\r\n",
+                     (unsigned long)acq_media_errors, (unsigned long)op,
+                     (unsigned long)code, (unsigned long)lba);
+    }
+    if (acq_media_errors >= ACQ_MEDIA_ERROR_LIMIT)
+    {
+      acq_media_gave_up = 1U;
+    }
     return -1;
   }
+  acq_media_errors = 0U;
 
   if ((acq_media->log_size(&size) == 0) && (size >= acq_file_max_bytes))
   {
@@ -843,7 +873,16 @@ static void acq_drain_and_close(void)
   }
   while (tx_queue_receive(&acq_queue, &rec, TX_NO_WAIT) == TX_SUCCESS)
   {
-    (void)acq_write_record(&rec);
+    /* Once the medium has failed, retrying every queued window is what made
+       `acq stop` hang for minutes; drop them instead. */
+    if (acq_media_gave_up != 0U)
+    {
+      acq_windows_dropped++;
+    }
+    else
+    {
+      (void)acq_write_record(&rec);
+    }
   }
   (void)acq_media->log_close();
   (void)acq_media->unlock();
@@ -860,7 +899,20 @@ void app_acq_writer_entry(unsigned long thread_input)
 
     acq_record_t rec;
     uint32_t lines = 0U;
-    int locked = (acq_media->lock() == 0);
+    int locked = 0;
+
+    if (acq_media_gave_up != 0U)
+    {
+      /* Drain without logging so the queue cannot grow unbounded. */
+      while (tx_queue_receive(&acq_queue, &rec, TX_NO_WAIT) == TX_SUCCESS)
+      {
+        acq_windows_dropped++;
+      }
+      tx_thread_sleep(APP_MS_TO_TICKS(10));
+      continue;
+    }
+
+    locked = (acq_media->lock() == 0);
 
     if (locked)
     {
@@ -871,11 +923,18 @@ void app_acq_writer_entry(unsigned long thread_input)
           acq_windows_dropped++;
         }
         lines++;
+        app_hb_mark(APP_HB_WRITER);
       }
-      if (lines > 0U)
+      /*
+       * Rate-limit the flush. At 50 kHz a window arrives every 10 ms and the
+       * queue normally holds just one, so "flush per batch" degenerated into
+       * "flush per record" and the write amplification outpaced the link.
+       */
+      if ((lines > 0U) && ((HAL_GetTick() - acq_last_flush_ms) >= ACQ_FLUSH_INTERVAL_MS))
       {
         (void)acq_media->log_flush();
         acq_flush_batches++;
+        acq_last_flush_ms = HAL_GetTick();
       }
       (void)acq_media->unlock();
     }
@@ -983,7 +1042,7 @@ int app_acq_demux_selftest(void)
 
 void app_acq_report(void)
 {
-  app_log_printf("ACQ running=%d mode=%s target=%s rate=%lu ch=%lu file=%s windows=%lu samples=%lu files=%lu min=%lu max=%lu drop=%lu dma_ovr=%lu qdrop=%lu flush=%lu\r\n",
+  app_log_printf("ACQ running=%d mode=%s target=%s rate=%lu ch=%lu file=%s windows=%lu samples=%lu files=%lu min=%lu max=%lu drop=%lu dma_ovr=%lu qdrop=%lu flush=%lu media_err=%lu gave_up=%lu\r\n",
                  (int)acq_running,
                  (acq_mode == ACQ_MODE_DMA) ? "dma" : "irq",
                  acq_media->name,
@@ -998,7 +1057,9 @@ void app_acq_report(void)
                  (unsigned long)acq_ring_drops,
                  (unsigned long)acq_dma_overruns,
                  (unsigned long)acq_windows_dropped,
-                 (unsigned long)acq_flush_batches);
+                 (unsigned long)acq_flush_batches,
+                 (unsigned long)acq_media_errors,
+                 (unsigned long)acq_media_gave_up);
 
   app_log_printf("ACQ adc isr=%lu sqr1=%08lx cfgr=%08lx isr_reg=%08lx\r\n",
                  (unsigned long)acq_isr_samples,
@@ -1553,4 +1614,10 @@ int app_acq_set_target(int target)
 const char *app_acq_target_name(void)
 {
   return acq_media->name;
+}
+
+/* 1 once the writer stopped touching a failing medium. */
+int app_acq_media_gave_up(void)
+{
+  return (acq_media_gave_up != 0U) ? 1 : 0;
 }

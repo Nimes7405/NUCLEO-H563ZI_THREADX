@@ -47,5 +47,7 @@ int app_acq_check(void);
    APP_ACQ_TARGET_SD mounts the card first and returns its mount status. */
 int app_acq_set_target(int target);
 const char *app_acq_target_name(void);
+/* 1 when the writer gave up on a repeatedly failing medium. */
+int app_acq_media_gave_up(void);
 
 #endif

@@ -35,4 +35,7 @@ uint32_t app_sdspi_block_addressed(void);
 int app_sdspi_read_block(uint32_t lba, uint8_t *buf);
 int app_sdspi_write_block(uint32_t lba, const uint8_t *buf);
 
+/* op: 1=CMD17 r1, 2=data token, 3=CMD24 r1, 4=data response */
+void app_sdspi_last_error(uint32_t *op, uint32_t *code, uint32_t *lba);
+
 #endif
