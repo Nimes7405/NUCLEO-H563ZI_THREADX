@@ -29,6 +29,18 @@ da8d1f28b7c3f6837b6a2124068df1d0  ...Tx-Data-Logger.bin
 
 二进制相同即证明"复制没有引入差异"，后续任何功能退化都能归因到新代码。
 
+**板上复验**：在新目录执行 `./scripts/selfcheck.sh all`（会 `make clean` 后重建、
+重新烧写，再跑八组串口断言），退出码 0。脚本用 `set -e`，且 `serial_check.py`
+在任一断言失败时 `return 1`，因此退出码 0 等价于八组全部 PASS：
+
+```
+basic    fs    acq    mch    dma    rtc    watchdog    fault
+ PASS   PASS   PASS   PASS   PASS   PASS     PASS      PASS
+```
+
+这一步确认了 OpenOCD 烧写路径、`/dev/ttyACM0`（ST-LINK VCP → USART3）与新目录
+的相对路径都正常，后续 USBX 出问题时有干净的对照点。
+
 ## 2. P3-1：CDC-ACM 命令通道
 
 （待实现）
