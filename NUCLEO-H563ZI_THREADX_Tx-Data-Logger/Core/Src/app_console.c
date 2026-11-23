@@ -7,6 +7,7 @@
 #include "app_log.h"
 #include "app_sdspi.h"
 #include "app_fxsd.h"
+#include "app_rtc.h"
 #include "app_stacks.h"
 #include "app_watchdog.h"
 
@@ -32,6 +33,7 @@ static void console_dma(const char *arg);
 static void console_fs(const char *arg);
 
 static void console_sd(const char *arg);
+static void console_rtc(const char *arg);
 static void console_sd_locked(const char *arg);
 static void console_stall(const char *arg);
 
@@ -175,7 +177,7 @@ void app_console_status(void)
 
 static void console_help(void)
 {
-  app_log_printf("HELP commands: status stack fault wdg log <text> fs <info|ls|format|mount|umount|write|append|read|rm|test|fill|stress> acq <info|hwcheck [ext]|target <sim|sd>|start [dma|irq] [hz]|stop|check|selftest|ch [1-4]|demux|level [0-19]|dac [0-4095]> sd <raw|fs> dma <env|test> stall <0|1|2> crash reboot\r\n");
+  app_log_printf("HELP commands: status stack fault wdg log <text> fs <info|ls|format|mount|umount|write|append|read|rm|test|fill|stress> rtc <info|set YYYY-MM-DD HH:MM:SS> acq <info|hwcheck [ext]|target <sim|sd>|start [dma|irq] [hz]|stop|check|selftest|ch [1-4]|demux|level [0-19]|dac [0-4095]> sd <raw|fs> dma <env|test> stall <0|1|2> crash reboot\r\n");
 }
 
 static void console_fault_report(void)
@@ -989,6 +991,45 @@ static void console_sd_locked(const char *arg)
   app_log_printf("ERR usage: sd <info|pins|jump|echo|probe|rdprobe <lba>|init|read <lba>|wtest <lba>|mount|umount|format [sectors]|ls|put <name> <text>|cat <name>|rm <name>>\r\n");
 }
 
+/* Calendar clock used for the log timestamps. */
+static void console_rtc(const char *arg)
+{
+  while (*arg == ' ')
+  {
+    arg++;
+  }
+
+  if ((*arg == '\0') || (strcmp(arg, "info") == 0))
+  {
+    app_rtc_report();
+    return;
+  }
+
+  if (strncmp(arg, "set ", 4) == 0)
+  {
+    const char *rest = arg + 4;
+    int rc;
+
+    while (*rest == ' ')
+    {
+      rest++;
+    }
+    rc = app_rtc_set_from_string(rest);
+    app_log_printf("RTC set rc=%d\r\n", rc);
+    if (rc == 0)
+    {
+      app_rtc_report();
+    }
+    else
+    {
+      app_log_printf("ERR usage: rtc set YYYY-MM-DD HH:MM:SS\r\n");
+    }
+    return;
+  }
+
+  app_log_printf("ERR usage: rtc [info] | rtc set YYYY-MM-DD HH:MM:SS\r\n");
+}
+
 static void console_dma(const char *arg)
 {
   while (*arg == ' ')
@@ -1066,6 +1107,10 @@ static void console_dispatch(char *line)
   else if (strncmp(line, "sd", 2) == 0)
   {
     console_sd(line + 2);
+  }
+  else if (strncmp(line, "rtc", 3) == 0)
+  {
+    console_rtc(line + 3);
   }
   else if (strncmp(line, "dma", 3) == 0)
   {

@@ -2,6 +2,7 @@
 #include "app_config.h"
 #include "app_fxdisk.h"
 #include "app_fxsd.h"
+#include "app_rtc.h"
 #include "app_log.h"
 #include "app_sdspi.h"
 #include "app_watchdog.h"
@@ -184,6 +185,11 @@ typedef struct
   uint32_t samples;
   uint32_t channels;
   uint32_t bad_line;
+  uint32_t header_seen;
+  uint32_t first_epoch;
+  uint32_t last_epoch;
+  uint32_t last_index;
+  uint32_t nonmonotonic;
   int failed;
 } acq_parse_t;
 
@@ -534,6 +540,26 @@ static int acq_open_file(void)
     return rc;
   }
 
+  /* Self-describing file: the header carries the time base and geometry, so a
+     CSV that has been rotated or copied elsewhere is still interpretable. */
+  {
+    char header[ACQ_LINE_MAX];
+    char stamp[24];
+    int len;
+
+    app_rtc_format(stamp, sizeof(stamp));
+    len = snprintf(header, sizeof(header),
+                   "#ACQ2 start=%s epoch=%lu ts=epoch_s rate=%lu ch=%lu frame=%lu\r\n",
+                   stamp, (unsigned long)app_rtc_epoch(),
+                   (unsigned long)acq_rate_hz,
+                   (unsigned long)acq_eval_channels,
+                   (unsigned long)APP_ACQ_WINDOW_FRAMES);
+    if (len > 0)
+    {
+      (void)acq_media->log_write(header, (uint32_t)len);
+    }
+  }
+
   acq_file_index++;
   if (acq_files_created < APP_ACQ_FILE_KEEP)
   {
@@ -709,7 +735,7 @@ int app_acq_running(void)
 }
 
 /* Consumer side: format one window record, append, and rotate when full.
-   Line layout: idx,count,nch,min0,max0,avg0[,min1,max1,avg1...]
+   Line layout: epoch,idx,count,nch,min0,max0,avg0[,min1,max1,avg1...]
    Caller must hold the media lock. */
 static int acq_write_record(const acq_record_t *rec)
 {
@@ -718,7 +744,8 @@ static int acq_write_record(const acq_record_t *rec)
   int len;
   int pos;
 
-  len = snprintf(line, sizeof(line), "%lu,%lu,%lu",
+  len = snprintf(line, sizeof(line), "%lu,%lu,%lu,%lu",
+                 (unsigned long)app_rtc_epoch(),
                  (unsigned long)rec->index,
                  (unsigned long)rec->count,
                  (unsigned long)rec->channels);
@@ -1114,21 +1141,36 @@ static uint32_t acq_split_fields(char *line, unsigned long *out, uint32_t max)
 /* Validate one CSV line: idx,count,nch,min0,max0,avg0[,min1,max1,avg1...] */
 static void acq_feed_line(acq_parse_t *ctx)
 {
-  unsigned long value[3U + (3U * APP_ACQ_CH_MAX)];
+  /* epoch, idx, count, nch, then min/max/avg per channel. */
+  unsigned long value[4U + (3U * APP_ACQ_CH_MAX)];
   uint32_t fields;
+  unsigned long epoch;
+  unsigned long index;
   unsigned long count;
   unsigned long nch;
 
   ctx->line[ctx->used] = '\0';
   ctx->used = 0U;
 
+  /* The header is the only line that does not start with a digit. */
+  if ((ctx->line[0] == '#') || (ctx->line[0] == '\0'))
+  {
+    if (ctx->line[0] == '#')
+    {
+      ctx->header_seen = 1U;
+    }
+    return;
+  }
+
   fields = acq_split_fields(ctx->line, value, (uint32_t)(sizeof(value) / sizeof(value[0])));
 
-  count = (fields > 1U) ? value[1] : 0UL;
-  nch = (fields > 2U) ? value[2] : 0UL;
+  epoch = (fields > 0U) ? value[0] : 0UL;
+  index = (fields > 1U) ? value[1] : 0UL;
+  count = (fields > 2U) ? value[2] : 0UL;
+  nch = (fields > 3U) ? value[3] : 0UL;
 
-  if ((fields < 6U) || (nch < 1UL) || (nch > APP_ACQ_CH_MAX) ||
-      (fields != (3U + (3U * nch))) || (count != APP_ACQ_WINDOW_FRAMES) ||
+  if ((fields < 7U) || (nch < 1UL) || (nch > APP_ACQ_CH_MAX) ||
+      (fields != (4U + (3U * nch))) || (count != APP_ACQ_WINDOW_FRAMES) ||
       ((ctx->channels != 0U) && (nch != ctx->channels)))
   {
     if (ctx->failed == 0)
@@ -1139,11 +1181,27 @@ static void acq_feed_line(acq_parse_t *ctx)
     return;
   }
 
+  /* Timestamps must never go backwards and the window counter must be
+     contiguous, which also proves the RTC is actually advancing. */
+  if (ctx->lines != 0U)
+  {
+    if ((epoch < ctx->last_epoch) || (index != (ctx->last_index + 1U)))
+    {
+      ctx->nonmonotonic++;
+    }
+  }
+  else
+  {
+    ctx->first_epoch = (uint32_t)epoch;
+  }
+  ctx->last_epoch = (uint32_t)epoch;
+  ctx->last_index = (uint32_t)index;
+
   for (uint32_t ch = 0U; ch < (uint32_t)nch; ch++)
   {
-    unsigned long minimum = value[3U + (3U * ch)];
-    unsigned long maximum = value[4U + (3U * ch)];
-    unsigned long average = value[5U + (3U * ch)];
+    unsigned long minimum = value[4U + (3U * ch)];
+    unsigned long maximum = value[5U + (3U * ch)];
+    unsigned long average = value[6U + (3U * ch)];
 
     if ((minimum > maximum) || (average < minimum) || (average > maximum) ||
         (maximum > 4095UL))
@@ -1239,10 +1297,19 @@ int app_acq_check(void)
   }
   else
   {
+    char first[24];
+    char last[24];
+
+    app_rtc_format_epoch(ctx.first_epoch, first, sizeof(first));
+    app_rtc_format_epoch(ctx.last_epoch, last, sizeof(last));
     app_log_printf("ACQ CHECK PASS file=%s lines=%lu channels=%lu samples=%lu bytes=%lu\r\n",
                    acq_current, (unsigned long)ctx.lines, (unsigned long)ctx.channels,
                    (unsigned long)ctx.samples, (unsigned long)total);
-    result = 0;
+    app_log_printf("ACQ CHECK time hdr=%lu first=%s last=%s span_s=%lu bad_ts=%lu\r\n",
+                   (unsigned long)ctx.header_seen, first, last,
+                   (unsigned long)(ctx.last_epoch - ctx.first_epoch),
+                   (unsigned long)ctx.nonmonotonic);
+    result = (ctx.nonmonotonic == 0U) ? 0 : -3;
   }
 
   (void)acq_media->unlock();

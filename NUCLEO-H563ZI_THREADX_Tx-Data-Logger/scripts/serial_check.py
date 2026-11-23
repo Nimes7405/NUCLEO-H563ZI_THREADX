@@ -220,8 +220,11 @@ def mode_fs(port):
     return ok
 
 
+# "target=" sits between mode and rate; the non-capturing group keeps the
+# numbering below unchanged.
 ACQ_INFO = (
-    r"ACQ running=(\d) mode=(\w+) rate=(\d+) ch=(\d+) file=(\S+) windows=(\d+) "
+    r"ACQ running=(\d) mode=(\w+) (?:target=\w+ )?rate=(\d+) ch=(\d+) file=(\S+) "
+    r"windows=(\d+) "
     r"samples=(\d+) files=(\d+) min=(\d+) max=(\d+) drop=(\d+) dma_ovr=(\d+) "
     r"qdrop=(\d+) flush=(\d+)"
 )
@@ -411,12 +414,65 @@ def mode_dma(port):
     return ok
 
 
+def mode_rtc(port):
+    """Calendar clock and the CSV v2 timestamps it produces."""
+    port.drain_quiet()
+
+    port.clear()
+    port.send("rtc")
+    ok = check(port, "rtc-ready", port.wait_for("RTC ready=1", 4.0), "RTC ready=1")
+    text = port.text()
+    ok &= check(port, "rtc-source", ("source=lse" in text) or ("source=lsi" in text),
+                "source=lse|lsi")
+
+    port.clear()
+    port.send("rtc set 2026-01-02 03:04:05")
+    ok &= check(port, "rtc-set", port.wait_for("RTC set rc=0", 4.0), "RTC set rc=0")
+    ok &= check(port, "rtc-echo", port.wait_for("2026-01-02 03:04:0", 3.0),
+                "2026-01-02 03:04:0x")
+
+    port.clear()
+    port.send("rtc")
+    port.read_for(1.2)
+    text = port.text()
+    ok &= check(port, "rtc-advances", "2026-01-02 03:04:" in text, "2026-01-02 03:04:")
+
+    port.clear()
+    port.send("rtc set 2026-13-45 99:99:99")
+    ok &= check(port, "rtc-reject-bad", port.wait_for("RTC set rc=-2", 4.0),
+                "RTC set rc=-2")
+
+    port.send("acq target sim")
+    port.wait_for("ACQ target=", 3.0)
+    port.clear()
+    port.send("acq ch 2")
+    ok &= check(port, "rtc-ch2", port.wait_for("ACQ channels=2", 3.0), "ACQ channels=2")
+    port.clear()
+    port.send("fs format")
+    ok &= check(port, "rtc-volume", port.wait_for("FS format=ok rc=0", 20.0),
+                "FS format=ok rc=0")
+    ok &= acq_capture(port, "rtc-cap", "acq start dma 10000", 1.5, 20, 0.01, 0, 1)
+
+    port.clear()
+    port.send("acq check")
+    ok &= check(port, "rtc-check", port.wait_for("ACQ CHECK PASS", 10.0), "ACQ CHECK PASS")
+    text = port.text()
+    ok &= check(port, "rtc-header", "hdr=1" in text, "hdr=1")
+    ok &= check(port, "rtc-monotonic", "bad_ts=0" in text, "bad_ts=0")
+    ok &= check(port, "rtc-year", "2026-01-02" in text, "2026-01-02")
+
+    port.clear()
+    port.send("acq ch 1")
+    ok &= check(port, "rtc-restore", port.wait_for("ACQ channels=1", 3.0), "ACQ channels=1")
+    return ok
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", default="/dev/ttyACM0")
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--mode",
-                        choices=["basic", "fs", "acq", "mch", "dma", "watchdog", "fault"],
+                        choices=["basic", "fs", "acq", "mch", "dma", "rtc", "watchdog", "fault"],
                         default="basic")
     args = parser.parse_args()
 
@@ -434,6 +490,8 @@ def main():
             ok = mode_mch(port)
         elif args.mode == "dma":
             ok = mode_dma(port)
+        elif args.mode == "rtc":
+            ok = mode_rtc(port)
         elif args.mode == "watchdog":
             ok = mode_watchdog(port)
         else:

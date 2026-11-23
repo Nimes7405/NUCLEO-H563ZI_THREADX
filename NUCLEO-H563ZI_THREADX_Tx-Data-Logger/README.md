@@ -19,7 +19,7 @@
 | 环形缓冲 | 2048 样本 | 8192 样本（交织存放） |
 | CSV | `idx,min,max,avg,count` | `idx,count,nch,min0,max0,avg0[,min1,...]` |
 | 文件大小 | 2 KB | 4 KB（多通道行长约为 4 倍） |
-| 自检 | 六组 | 七组（新增 `mch`） |
+| 自检 | 七组 | 八组（新增 `rtc`） |
 
 ## 通道表
 
@@ -392,27 +392,67 @@ ADC HC FAIL failures=4
 
 即"基准全对、输入全错"，正是第 1 阶段要抓的形态。同一套判据在 F207 上全部通过。
 
+## 时间戳与文件头（CSV v2）
+
+日志自带 RTC 日历：文件第一行是文件头，之后每行第一个字段是时间戳。
+
+```
+#ACQ2 start=2026-11-22 19:50:47 epoch=848692247 ts=epoch_s rate=10000 ch=1 frame=500
+848692247,0,500,1,461,908,518
+848692247,1,500,1,437,561,509
+```
+
+- 头部以 `#` 开头，说明时间基准（`ts=epoch_s`）、采样率、通道数、每窗帧数；
+  解析器自动跳过
+- 每行：`epoch,idx,count,nch,min0,max0,avg0[,...]`
+- `epoch` 是自 **2000-01-01 00:00:00** 起的秒数（不是 Unix epoch），
+  用 `<epoch>` 直接填入任何需要绝对时间的工具即可
+- 需要毫秒精度时用 `idx` 换算：`t = epoch_of_idx0 + (idx - idx0) × frame / rate`
+
+### RTC 时钟源
+
+驱动**优先 LSE**（板载 32.768 kHz 晶振，实测可用），失败时回退 **LSI**
+（约 32 kHz，漂移按百分比算）。`rtc` 命令会显示实际使用的源。
+
+NUCLEO 板默认没有 VBAT 电池，断电后日历从头开始，上电后设置一次即可：
+
+```
+rtc                              # RTC ready=1 source=lse(32.768kHz) time=...
+rtc set 2026-11-22 19:50:00      # RTC set rc=0
+```
+
+热复位（看门狗/软件复位）不会丢失时间：驱动用 `TAMP->BKP0R` 里的魔数判断
+日历已在运行，跳过重新初始化。
+
 ## 数据格式
 
 每次触发转换 N 个通道，一个"帧"= 每通道一个样本。窗口固定 **500 帧**，
 一行 CSV 记录一个窗口的全部通道统计：
 
 ```
-idx,count,nch,min0,max0,avg0[,min1,max1,avg1...]
+epoch,idx,count,nch,min0,max0,avg0[,min1,max1,avg1...]
 ```
 
 4 通道示例：
 
 ```
-281,500,4,422,582,501,425,615,519,438,591,516,452,612,525
+848692247,281,500,4,422,582,501,425,615,519,438,591,516,452,612,525
 ```
 
-- `idx` 窗口序号，`count` 帧数（恒为 500），`nch` 通道数（1–4）
+- `epoch` 时间戳（见上一节），`idx` 窗口序号，`count` 帧数（恒为 500），
+  `nch` 通道数（1–4）
 - 之后每通道 3 个字段：`min`、`max`、`avg`（12 bit，0–4095）
-- `acq check` 逐行校验：字段数必须等于 `3 + 3*nch`、`nch` 与本次采集一致、
-  `min ≤ avg ≤ max`、`max ≤ 4095`、`count == 500`
+- `acq check` 逐行校验：字段数必须等于 `4 + 3*nch`、`nch` 与本次采集一致、
+  `min ≤ avg ≤ max`、`max ≤ 4095`、`count == 500`，并额外检查
+  **时间戳单调不减**与 **idx 连续**，结果行给出 `hdr` / `first` / `last` /
+  `span_s` / `bad_ts`
 
-单文件 4 KB 轮转，`LOG0000.CSV`…`LOG0003.CSV` 循环覆盖。
+```
+ACQ CHECK PASS file=LOG0000.CSV lines=56 channels=4 samples=112000 bytes=3884
+ACQ CHECK time hdr=1 first=2026-11-22 19:50:17 last=2026-11-22 19:50:20 span_s=3 bad_ts=0
+```
+
+单文件模拟盘 4 KB 轮转（`LOG0000.CSV`…`LOG0003.CSV` 循环覆盖），SD 卡 1 MB 轮转。
 
 ## 为什么多通道必须用 DMA
 
@@ -468,7 +508,7 @@ ADC 序列扫描（TIM3 每触发一次扫完 N 路）
 | 4 通道 100 kHz | 3.3 s：`windows=668 samples=1336000 drop=0 dma_ovr=0 qdrop=0`，即 **400 k 样本/秒零丢失** |
 | CSV 内容 | `281,500,4,422,582,501,425,615,519,438,591,516,452,612,525` |
 | 线程栈 | `sampler=400/2048`、`writer=1544/3072`、`console=1444/4096`、`monitor=1008/2048` |
-| 一键自检 | `./scripts/selfcheck.sh all`：`basic` 10、`fs` 19、`acq` 42、`mch` 36、`dma` 20、`watchdog` 4、`fault` 5 全 PASS |
+| 一键自检 | `./scripts/selfcheck.sh all`：`basic` 10、`fs` 19、`acq` 42、`mch` 36、`dma` 20、`rtc` 19、`watchdog` 4、`fault` 5 全 PASS |
 
 ## 串口命令
 
@@ -485,6 +525,8 @@ USART3（ST-LINK 虚拟串口，PD8/PD9，115200 8N1）。文件系统命令与
 | `acq info` | 模式、采样率、`ch`、窗口/样本/文件数、min/max、`drop`/`dma_ovr`/`qdrop`/`flush`，以及 ADC `isr` 计数与 `SQR1/CFGR/ISR` |
 | `acq check` | 回读最新日志并按 `nch` 逐通道校验 |
 | `acq demux` | 确定性解交织自检（不依赖外部信号） |
+| `rtc` | 显示 RTC 状态（时钟源、当前时间、epoch） |
+| `rtc set <YYYY-MM-DD HH:MM:SS>` | 设置日历时间（断电后需重设一次） |
 | `acq level` | 逐通道打印一次性软件触发采样的原始值/档位，并附 VREFINT、VDD、内部温度与 VBAT |
 | `acq level <0-19>` | 单测某个 ADC 通道号（0–19） |
 | `acq dac [0-4095]` | 用 `DAC1_OUT1`(PA4) 驱动 `ADC1_INP18` 回环，验证外部通道能否读到电压 |
@@ -497,11 +539,12 @@ USART3（ST-LINK 虚拟串口，PD8/PD9，115200 8N1）。文件系统命令与
 ./scripts/selfcheck.sh basic     # 构建 + 符号 + 烧写 + 状态/栈/故障/日志
 ./scripts/selfcheck.sh fs        # 文件系统 19 项断言
 ./scripts/selfcheck.sh acq       # 单通道中断 10 kHz + DMA 50/100 kHz，42 项断言
+./scripts/selfcheck.sh rtc       # RTC 走时 + 设置/拒绝非法值 + CSV 头与时间戳单调性，19 项断言
 ./scripts/selfcheck.sh mch       # 解交织 + 中断拒绝 + 2/4 通道 DMA，36 项断言
 ./scripts/selfcheck.sh dma       # GPDMA 属性矩阵 + 采集自愈，20 项断言
 ./scripts/selfcheck.sh watchdog  # 线程卡死 → IWDG 复位
 ./scripts/selfcheck.sh fault     # BusFault 记录与重启报告
-./scripts/selfcheck.sh all       # 七组顺序执行
+./scripts/selfcheck.sh all       # 八组顺序执行
 ```
 
 可用 `PORT=/dev/ttyACM0` 覆盖串口。

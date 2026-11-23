@@ -24,7 +24,7 @@ echo "PASS symbols"
 make flash
 
 case "$MODE" in
-  basic|fs|acq|mch|dma|watchdog|fault)
+  basic|fs|acq|mch|dma|rtc|watchdog|fault)
     python3 scripts/serial_check.py --port "$PORT" --mode "$MODE"
     ;;
   all)
@@ -33,11 +33,12 @@ case "$MODE" in
     python3 scripts/serial_check.py --port "$PORT" --mode acq
     python3 scripts/serial_check.py --port "$PORT" --mode mch
     python3 scripts/serial_check.py --port "$PORT" --mode dma
+    python3 scripts/serial_check.py --port "$PORT" --mode rtc
     python3 scripts/serial_check.py --port "$PORT" --mode watchdog
     python3 scripts/serial_check.py --port "$PORT" --mode fault
     ;;
   *)
-    echo "usage: $0 [basic|fs|acq|mch|dma|watchdog|fault|all]" >&2
+    echo "usage: $0 [basic|fs|acq|mch|dma|rtc|watchdog|fault|all]" >&2
     exit 2
     ;;
 esac

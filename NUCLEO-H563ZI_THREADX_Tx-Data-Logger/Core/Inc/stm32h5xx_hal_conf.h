@@ -13,6 +13,7 @@
 #define HAL_IWDG_MODULE_ENABLED
 #define HAL_ADC_MODULE_ENABLED
 #define HAL_DAC_MODULE_ENABLED
+#define HAL_RTC_MODULE_ENABLED
 #define HAL_SPI_MODULE_ENABLED
 
 #define HSE_VALUE 8000000UL
@@ -90,6 +91,10 @@
 #ifdef HAL_SPI_MODULE_ENABLED
 #include "stm32h5xx_hal_spi.h"
 #include "stm32h5xx_hal_spi_ex.h"
+#endif
+#ifdef HAL_RTC_MODULE_ENABLED
+#include "stm32h5xx_hal_rtc.h"
+#include "stm32h5xx_hal_rtc_ex.h"
 #endif
 
 #ifdef USE_FULL_ASSERT
