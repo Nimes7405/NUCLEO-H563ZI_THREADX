@@ -11,6 +11,7 @@
 | [`NUCLEO-H563ZI_THREADX_Tx-Control-Node`](./NUCLEO-H563ZI_THREADX_Tx-Control-Node/README.md) | 路线 1：TIM1 PWM + ADC 注入同步、10 kHz 前馈 + PI 控制环、DWT 抖动实测、软件/ADC 双反馈；P3-lite 静态 MPU + 栈 guard + 安全模式 + 分级 WWDG；P4 release profile + `cal` 参数校准 + 片内 Flash 掉电保存 | 已在板上验证（`selfcheck` 七组全通过；1 h O0 soak PASS；O2 `selfcheck all` 七组 PASS；`release_check.sh` PASS；校准值重启/重烧后保持） |
 | [`NUCLEO-H563ZI_THREADX_Tx-FileX-SimDisk`](./NUCLEO-H563ZI_THREADX_Tx-FileX-SimDisk/README.md) | 路线 2 软件栈：RAM 内模拟 NOR（擦除 + 只允许 1→0）承载 FileX + LevelX；TIM3 触发 ADC1 → EOC 中断或 GPDMA 循环 → 环形缓冲 → CSV 落盘 → 2 KB 轮转 → 回读校验，无需 SD 卡或外部 Flash | 已在板上验证（`selfcheck` basic/fs/acq/dma/watchdog/fault 六组全通过；`fs stress` 触发真实块回收与擦除，1→0 违规为 0；GPDMA 100 kHz 采集 422,000 样本零丢样、`acq check` 逐行校验通过；`dma test` 定位到"计数但不落内存"的根因） |
 | [`NUCLEO-H563ZI_THREADX_Tx-Data-Logger`](./NUCLEO-H563ZI_THREADX_Tx-Data-Logger/README.md) | 路线 2 多通道：从 SimDisk 派生，ADC 序列扫描 1–4 通道 → GPDMA 交织双半缓冲 → 每通道窗口统计 → CSV；新增确定性解交织自检 | 已在板上验证（`selfcheck` 七组全通过；4 通道 100 kHz = 400 k 样本/秒、`drop=0 dma_ovr=0`；`acq demux` 四路斜坡全部命中） |
+| [`NUCLEO-H563ZI_THREADX_Tx-Usb-Data-Logger`](./NUCLEO-H563ZI_THREADX_Tx-Usb-Data-Logger/README.md) | 路线 2 P3：从 Data-Logger 派生，加 USBX 复合设备（MSC 数据盘 + CDC 命令通道），把"拔卡取数 + UART 命令"合并到一根 USB-C | 基线迁移完成（构建产物与上游二进制一致）；USBX 待接入 |
 | `NUCLEO-H563ZI_THREADX_Tx-Bench-Tool`（规划，主机侧） | 串口日志抓取、抖动/栈水位分析、长跑报告 | 规划中 |
 
 相关（不在本 workspace 内）：
