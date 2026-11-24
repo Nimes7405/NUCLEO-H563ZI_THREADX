@@ -552,6 +552,34 @@ int app_fxsd_read_stream(const char *name, app_fxsd_chunk_fn fn, void *ctx,
   return (int)status;
 }
 
+int app_fxsd_append_lazy(const char *name, const char *text)
+{
+  FX_FILE file;
+  UINT status;
+
+  if ((sd_mounted == 0U) || (name == NULL) || (text == NULL))
+  {
+    return -1;
+  }
+
+  status = fx_file_create(&sd_media, (CHAR *)name);
+  if ((status != FX_SUCCESS) && (status != FX_ALREADY_CREATED))
+  {
+    return (int)status;
+  }
+
+  status = fx_file_open(&sd_media, &file, (CHAR *)name, FX_OPEN_FOR_WRITE);
+  if (status != FX_SUCCESS)
+  {
+    return (int)status;
+  }
+
+  (void)fx_file_seek(&file, file.fx_file_current_file_size);
+  status = fx_file_write(&file, (VOID *)text, (ULONG)strlen(text));
+  (void)fx_file_close(&file);
+  return (status == FX_SUCCESS) ? 0 : (int)status;
+}
+
 int app_fxsd_delete(const char *name)
 {
   if ((sd_mounted == 0U) || (name == NULL))

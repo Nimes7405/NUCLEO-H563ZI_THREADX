@@ -4,6 +4,7 @@
 #include "app_fxsd.h"
 #include "app_rtc.h"
 #include "app_log.h"
+#include "app_watchdog.h"
 #include "app_sdspi.h"
 #include "app_watchdog.h"
 
@@ -1248,9 +1249,26 @@ static void acq_feed_line(acq_parse_t *ctx)
   ctx->lines++;
 }
 
+/* Reading a multi-megabyte file from a thread at priority 8 starves the two
+   producer threads at 10 and 11. They stop marking heartbeats, the watchdog
+   stops feeding IWDG after 1.5 s, and the board resets four seconds later -
+   i.e. a long `acq check` on a full file would reboot the board in the middle
+   of the check. Yield every 16 KB so they keep running. */
+#define ACQ_PARSE_YIELD_CHUNKS  64U
+
 static int acq_parse_chunk(const char *data, uint32_t len, void *arg)
 {
   acq_parse_t *ctx = (acq_parse_t *)arg;
+  static uint32_t chunks;
+
+  if (++chunks >= ACQ_PARSE_YIELD_CHUNKS)
+  {
+    chunks = 0U;
+    /* This runs in the console thread, which cannot mark its own heartbeat
+       while it is busy here; the work is progress, so say so. */
+    app_hb_mark(APP_HB_CONSOLE);
+    tx_thread_sleep(1);
+  }
 
   for (uint32_t i = 0U; i < len; i++)
   {
@@ -1747,6 +1765,17 @@ int app_acq_set_files(uint32_t max_bytes, uint32_t keep)
   acq_file_max_bytes = max_bytes;
   acq_file_keep = keep;
   acq_file_index = 0U;
+  acq_files_created = 0U;
+  return 0;
+}
+
+int app_acq_resume_index(uint32_t index)
+{
+  if (acq_running != 0U)
+  {
+    return -1;
+  }
+  acq_file_index = index;
   acq_files_created = 0U;
   return 0;
 }

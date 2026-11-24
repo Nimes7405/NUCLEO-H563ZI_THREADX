@@ -123,6 +123,8 @@ void app_console_thread_entry(ULONG thread_input)
   (void)thread_input;
 
   app_fxdisk_init();
+  /* A run that was interrupted by a power cycle picks itself back up here. */
+  app_soak_boot_resume();
 
   app_log_printf("READY tx-data-logger %s\r\n", APP_VERSION);
 
@@ -137,6 +139,10 @@ void app_console_thread_entry(ULONG thread_input)
       rx_tail = (rx_tail + 1U) & (APP_CON_RX_SIZE - 1U);
       console_feed(c, line_buffer, &line_len);
     }
+
+    /* File work for an unattended run happens here, on the stack that already
+       handles `fs` commands. */
+    app_soak_service();
 
     uint32_t got;
     uint8_t usb_chunk[64];
@@ -206,7 +212,7 @@ void app_console_status(void)
 
 static void console_help(void)
 {
-  app_log_printf("HELP commands: status stack fault wdg log <text> fs <info|ls|format|mount|umount|write|append|read|rm|test|fill|stress> rtc <info|set YYYY-MM-DD HH:MM:SS> acq <info|hwcheck [ext]|target <sim|sd>|start [dma|irq] [hz]|stop|check|selftest|ch [1-4]|demux|files [bytes keep]|level [0-19]|dac [0-4095]> sd <raw|fs> dma <env|test> usb [regs|cc] dump <name> soak <start h [hz] [ch]|stop|report> stall <0|1|2> crash reboot\r\n");
+  app_log_printf("HELP commands: status stack fault wdg log <text> fs <info|ls|format|mount|umount|write|append|read|rm|test|fill|stress> rtc <info|set YYYY-MM-DD HH:MM:SS> acq <info|hwcheck [ext]|target <sim|sd>|start [dma|irq] [hz]|stop|check|selftest|ch [1-4]|demux|files [bytes keep]|level [0-19]|dac [0-4095]> sd <raw|fs> dma <env|test> usb [regs|cc] dump <name> soak <start <8h|5m|90s> [hz] [ch]|stop|report> stall <0|1|2> crash reboot\r\n");
 }
 
 static void console_fault_report(void)
@@ -1243,10 +1249,19 @@ static void console_usb(const char *arg)
   app_usb_report();
 }
 
-/* Chunk callback for app_fxdisk_read_stream: 0 keeps the transfer going. */
+/* Chunk callback for app_fxdisk_read_stream: 0 keeps the transfer going.
+   Yields periodically for the same reason acq_parse_chunk does: a long dump
+   must not starve the producer threads into a watchdog reset. */
 static int console_dump_chunk(const char *data, uint32_t len, void *ctx)
 {
+  static uint32_t chunks;
+
   (void)ctx;
+  if ((++chunks % 32U) == 0U)
+  {
+    app_hb_mark(APP_HB_CONSOLE);
+    tx_thread_sleep(1);
+  }
   return app_usb_send_blocking((const uint8_t *)data, len);
 }
 
@@ -1338,9 +1353,10 @@ static void console_soak(const char *arg)
   if (strncmp(arg, "start", 5) == 0)
   {
     const char *opt = arg + 5;
-    unsigned long hours;
+    unsigned long value;
     unsigned long hz = 10000UL;
     unsigned long ch = APP_ACQ_CH_MAX;
+    char unit = 'h';
 
     while (*opt == ' ')
     {
@@ -1348,37 +1364,51 @@ static void console_soak(const char *arg)
     }
     if (*opt == '\0')
     {
-      app_log_printf("ERR usage: soak start <hours> [hz] [ch]\r\n");
+      app_log_printf("ERR usage: soak start <8h|5m|90s> [hz] [ch]\r\n");
       return;
     }
 
     char *end = NULL;
-    hours = strtoul(opt, &end, 10);
-    if (end != NULL)
+    value = strtoul(opt, &end, 10);
+    if ((end != NULL) && ((*end == 'h') || (*end == 'm') || (*end == 's')))
     {
+      unit = *end;
+      end++;
+    }
+    while ((end != NULL) && (*end == ' '))
+    {
+      end++;
+    }
+    if ((end != NULL) && (*end != '\0'))
+    {
+      hz = strtoul(end, &end, 10);
       while (*end == ' ')
       {
         end++;
       }
       if (*end != '\0')
       {
-        hz = strtoul(end, &end, 10);
-        while (*end == ' ')
-        {
-          end++;
-        }
-        if (*end != '\0')
-        {
-          ch = strtoul(end, NULL, 10);
-        }
+        ch = strtoul(end, NULL, 10);
       }
     }
 
-    int rc = app_soak_start((uint32_t)hours, (uint32_t)hz, (uint32_t)ch);
-    app_log_printf("SOAK start=%s rc=%d\r\n", (rc == 0) ? "ok" : "fail", rc);
+    /* A bare number keeps the documented "hours" meaning; the suffix exists so
+       a five minute trial runs the exact same code path as an eight hour one. */
+    uint32_t duration_s;
+    switch (unit)
+    {
+      case 'm': duration_s = (uint32_t)value * 60U; break;
+      case 's': duration_s = (uint32_t)value; break;
+      default:  duration_s = (uint32_t)value * 3600U; break;
+    }
+
+    int rc = app_soak_start(duration_s, (uint32_t)hz, (uint32_t)ch);
+    app_log_printf("SOAK start=%s rc=%d duration_s=%lu\r\n",
+                   (rc == 0) ? "ok" : "fail", rc,
+                   (unsigned long)duration_s);
     if (rc != 0)
     {
-      app_log_printf("SOAK ERR rc=%d (1 hours, 2 hz, 3 ch, 4 already-capturing, "
+      app_log_printf("SOAK ERR rc=%d (1 duration, 2 hz, 3 ch, 4 already-capturing, "
                      "5 sd-not-mounted, 6 ch-set, 7 rotation, 8 acq-start)\r\n", rc);
       return;
     }
@@ -1386,5 +1416,5 @@ static void console_soak(const char *arg)
     return;
   }
 
-  app_log_printf("ERR usage: soak <start h [hz] [ch]|stop|report>\r\n");
+  app_log_printf("ERR usage: soak <start <8h|5m|90s> [hz] [ch]|stop|report>\r\n");
 }

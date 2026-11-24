@@ -24,6 +24,7 @@
 #define SOAK_BKP_LAST_IDX_R     TAMP->BKP11R
 #define SOAK_BKP_TARGET_R       TAMP->BKP12R
 #define SOAK_BKP_RESETS_R       TAMP->BKP13R
+#define SOAK_BKP_FILES_R        TAMP->BKP14R
 
 #define SOAK_MAGIC              0x534F414BU   /* "SOAK" */
 
@@ -37,6 +38,9 @@ static uint32_t soak_last_idx;
 static uint32_t soak_tick_acc;
 static int soak_active;
 static uint32_t soak_records;
+static uint32_t soak_files_base;   /* files opened by earlier boots of this run */
+static volatile int soak_record_pending;
+static volatile int soak_stop_pending;
 
 static void soak_ledger_clear(void)
 {
@@ -46,20 +50,21 @@ static void soak_ledger_clear(void)
   SOAK_BKP_LAST_IDX_R = 0U;
   SOAK_BKP_TARGET_R = 0U;
   SOAK_BKP_RESETS_R = 0U;
+  SOAK_BKP_FILES_R = 0U;
   SOAK_BKP_MAGIC_R = SOAK_MAGIC;
 }
 
 /* Rotation budget from the run length: files x max_bytes has to hold the whole
    capture, otherwise the ring starts overwriting the evidence it exists to
    preserve. 4 MB per file keeps the file count small. */
-static int soak_apply_rotation(uint32_t hours, uint32_t hz, uint32_t channels)
+static int soak_apply_rotation(uint32_t duration_s, uint32_t hz, uint32_t channels)
 {
-  /* One record per APP_ACQ_WINDOW_FRAMES frames; ~72 bytes per line at 4
-     channels including the CRLF, rounded up to be safe. */
-  uint32_t records_per_hour = (hz * 3600U) / APP_ACQ_WINDOW_FRAMES;
-  uint32_t bytes_per_hour = records_per_hour * (32U + (16U * channels));
+  /* One record per APP_ACQ_WINDOW_FRAMES frames; 61 bytes measured at 4
+     channels including the CRLF, 72 here to leave room. */
+  uint32_t records = (hz * duration_s) / APP_ACQ_WINDOW_FRAMES;
+  uint32_t bytes = records * (32U + (16U * channels));
   const uint32_t per_file = 4U * 1024U * 1024U;
-  uint32_t need = (bytes_per_hour * hours) / per_file + 2U;
+  uint32_t need = (bytes / per_file) + 2U;
 
   if (need < 2U)
   {
@@ -76,11 +81,13 @@ static void soak_write(const char *text)
 {
   /* SOAK.LOG shares the card with the capture, so it goes through the same
      lock the acquisition writer uses. */
-  if (app_fxsd_mounted_ready() != 0)
+  /* app_fxsd_mounted_ready() returns 0 when mounted; is_mounted() returns 1
+     and is the less surprising of the two to read here. */
+  if (app_fxsd_is_mounted() != 0)
   {
     if (app_fxsd_lock() == 0)
     {
-      (void)app_fxsd_write_file("SOAK.LOG", text, 1);
+      (void)app_fxsd_append_lazy("SOAK.LOG", text);
       (void)app_fxsd_unlock();
     }
   }
@@ -136,6 +143,7 @@ void app_soak_system_init(void)
   soak_last_idx = SOAK_BKP_LAST_IDX_R;
   soak_target_s = SOAK_BKP_TARGET_R;
   soak_resets = SOAK_BKP_RESETS_R;
+  soak_files_base = SOAK_BKP_FILES_R;
 
   if (soak_target_s != 0U)
   {
@@ -159,6 +167,7 @@ void app_soak_poll(void)
     app_acq_get_stats(&stats);
     soak_last_idx = stats.last_index;
     SOAK_BKP_LAST_IDX_R = soak_last_idx;
+    SOAK_BKP_FILES_R = soak_files_base + stats.files;
   }
 
   soak_tick_acc += APP_MONITOR_PERIOD_MS;
@@ -178,22 +187,228 @@ void app_soak_poll(void)
     if (since_record >= (APP_SOAK_RECORD_MS / 1000U))
     {
       since_record = 0U;
-      soak_records++;
-      soak_record('R');
+      soak_record_pending = 1;
     }
     if (soak_elapsed_s >= soak_target_s)
     {
-      app_soak_stop();
+      soak_stop_pending = 1;
     }
   }
 }
 
-int app_soak_start(uint32_t hours, uint32_t hz, uint32_t channels)
+/* Console thread: the only place that touches the card on the soak's behalf. */
+void app_soak_service(void)
+{
+  if (soak_stop_pending != 0)
+  {
+    soak_stop_pending = 0;
+    soak_record_pending = 0;
+    app_soak_stop();
+    return;
+  }
+  if (soak_record_pending != 0)
+  {
+    soak_record_pending = 0;
+    soak_records++;
+    soak_record('R');
+  }
+}
+
+/* SOAK.ARM: "<total_s> <hz> <ch>". It lives on the card because the backup
+   domain dies with the power, and the whole point is to survive a power swap. */
+static void soak_arm_write(uint32_t total_s, uint32_t hz, uint32_t channels)
+{
+  char text[48];
+
+  if (app_fxsd_is_mounted() == 0)
+  {
+    return;
+  }
+  snprintf(text, sizeof(text), "%lu %lu %lu\n",
+           (unsigned long)total_s, (unsigned long)hz, (unsigned long)channels);
+  if (app_fxsd_lock() == 0)
+  {
+    (void)app_fxsd_write_file("SOAK.ARM", text, 0);
+    (void)app_fxsd_unlock();
+  }
+}
+
+static void soak_arm_clear(void)
+{
+  if (app_fxsd_is_mounted() == 0)
+  {
+    return;
+  }
+  if (app_fxsd_lock() == 0)
+  {
+    (void)app_fxsd_delete("SOAK.ARM");
+    (void)app_fxsd_unlock();
+  }
+}
+
+/*
+ * A power cycle wipes the backup domain, so the ledger alone cannot say how far
+ * the run got. SOAK.LOG holds "elapsed_s=<n>" every 5 minutes; recover the last
+ * one so a power blip resumes with the remaining time instead of replaying the
+ * whole duration.
+ */
+typedef struct
+{
+  char line[176];
+  uint32_t used;
+  uint32_t best;
+} soak_scan_t;
+
+static void soak_scan_line(soak_scan_t *scan)
+{
+  const char *hit = strstr(scan->line, "elapsed_s=");
+
+  if (hit != NULL)
+  {
+    uint32_t value = (uint32_t)strtoul(hit + 10, NULL, 10);
+
+    if (value > scan->best)
+    {
+      scan->best = value;
+    }
+  }
+  scan->used = 0U;
+  scan->line[0] = '\0';
+}
+
+static int soak_log_scan_chunk(const char *data, uint32_t len, void *ctx)
+{
+  soak_scan_t *scan = (soak_scan_t *)ctx;
+
+  for (uint32_t i = 0U; i < len; i++)
+  {
+    char c = data[i];
+
+    if ((c == '\n') || (c == '\r'))
+    {
+      if (scan->used > 0U)
+      {
+        soak_scan_line(scan);
+      }
+      continue;
+    }
+    if (scan->used < (sizeof(scan->line) - 1U))
+    {
+      scan->line[scan->used++] = c;
+      scan->line[scan->used] = '\0';
+    }
+  }
+  return 0;
+}
+
+static uint32_t soak_recover_elapsed(void)
+{
+  soak_scan_t scan;
+  uint32_t total = 0U;
+
+  memset(&scan, 0, sizeof(scan));
+
+  if (app_fxsd_is_mounted() == 0)
+  {
+    return 0U;
+  }
+  if (app_fxsd_lock() != 0)
+  {
+    return 0U;
+  }
+  (void)app_fxsd_read_stream("SOAK.LOG", soak_log_scan_chunk, &scan, &total);
+  (void)app_fxsd_unlock();
+
+  return scan.best;
+}
+
+void app_soak_boot_resume(void)
+{
+  char text[48];
+  uint32_t len = 0U;
+  unsigned long total_s = 0UL;
+  unsigned long hz = 0UL;
+  unsigned long channels = 0UL;
+  uint32_t remaining;
+
+  /* The acquisition target is not remembered across a power cycle, so a run
+     that was pointed at the card has to re-mount it to find its own arm file. */
+  if (app_fxsd_is_mounted() == 0)
+  {
+    if (app_acq_set_target(APP_ACQ_TARGET_SD) != 0)
+    {
+      return;
+    }
+  }
+
+  if (app_fxsd_read_file("SOAK.ARM", text, sizeof(text) - 1U, &len) != 0)
+  {
+    return;
+  }
+  text[len] = '\0';
+
+  /* strtoul rather than sscanf: the scanf family drags in enough newlib to
+     cost ~45 KB of flash for three integers. */
+  {
+    char *end = text;
+
+    total_s = strtoul(end, &end, 10);
+    hz = strtoul(end, &end, 10);
+    channels = strtoul(end, &end, 10);
+  }
+  if ((total_s == 0UL) || (hz == 0UL) || (channels == 0UL))
+  {
+    soak_arm_clear();
+    return;
+  }
+
+  /* Take the better of the two sources: the backup domain is exact when it
+     survived, the log line is the only thing left after a power cycle. */
+  {
+    uint32_t from_log = soak_recover_elapsed();
+
+    if (from_log > soak_elapsed_s)
+    {
+      soak_elapsed_s = from_log;
+    }
+  }
+
+  if (total_s < soak_elapsed_s)
+  {
+    soak_elapsed_s = (uint32_t)total_s;
+  }
+  remaining = (uint32_t)total_s - soak_elapsed_s;
+
+  if (remaining < APP_SOAK_MIN_SECONDS)
+  {
+    soak_arm_clear();
+    return;
+  }
+
+  /* Continue the name ring where the previous boot stopped instead of starting
+     at LOG0000 and overwriting it. */
+  (void)app_acq_resume_index(soak_files_base);
+
+  if (app_soak_start(remaining, (uint32_t)hz, (uint32_t)channels) != 0)
+  {
+    return;
+  }
+
+  /* app_soak_start resets the counters; a resumed run has to keep them so the
+     report still shows the whole run, not just this segment. */
+  soak_elapsed_s = (uint32_t)total_s - remaining;
+  soak_target_s = (uint32_t)total_s;
+  SOAK_BKP_TARGET_R = soak_target_s;
+  SOAK_BKP_SECONDS_R = soak_elapsed_s;
+  SOAK_BKP_FILES_R = soak_files_base;
+}
+
+int app_soak_start(uint32_t duration_s, uint32_t hz, uint32_t channels)
 {
   char header[192];
   int rc;
 
-  if ((hours < 1U) || (hours > APP_SOAK_HOURS_MAX))
+  if ((duration_s < APP_SOAK_MIN_SECONDS) || (duration_s > (APP_SOAK_HOURS_MAX * 3600U)))
   {
     return -1;
   }
@@ -209,7 +424,7 @@ int app_soak_start(uint32_t hours, uint32_t hz, uint32_t channels)
   {
     return -4;
   }
-  if (app_fxsd_mounted_ready() == 0)
+  if (app_fxsd_is_mounted() == 0)
   {
     return -5;
   }
@@ -219,7 +434,7 @@ int app_soak_start(uint32_t hours, uint32_t hz, uint32_t channels)
   {
     return -6;
   }
-  rc = soak_apply_rotation(hours, hz, channels);
+  rc = soak_apply_rotation(duration_s, hz, channels);
   if (rc != 0)
   {
     return -7;
@@ -227,11 +442,14 @@ int app_soak_start(uint32_t hours, uint32_t hz, uint32_t channels)
 
   soak_hz = hz;
   soak_channels = channels;
-  soak_target_s = hours * 3600U;
+  soak_target_s = duration_s;
   soak_elapsed_s = 0U;
+  soak_files_base = 0U;
   soak_last_idx = 0U;
   soak_tick_acc = 0U;
   soak_records = 0U;
+  soak_record_pending = 0;
+  soak_stop_pending = 0;
 
   /* Re-arming must not inherit the previous run's reset count. */
   {
@@ -247,9 +465,9 @@ int app_soak_start(uint32_t hours, uint32_t hz, uint32_t channels)
   }
 
   snprintf(header, sizeof(header),
-           "#SOAK1 hours=%lu rate=%lu ch=%lu file_bytes=%lu keep=%lu "
+           "#SOAK1 duration_s=%lu rate=%lu ch=%lu file_bytes=%lu keep=%lu "
            "footprint=%lu boot_reset=%s boot=%lu\r\n",
-           (unsigned long)hours,
+           (unsigned long)duration_s,
            (unsigned long)hz,
            (unsigned long)channels,
            (unsigned long)app_acq_file_max_bytes(),
@@ -258,12 +476,14 @@ int app_soak_start(uint32_t hours, uint32_t hz, uint32_t channels)
            app_boot_reset_name(),
            (unsigned long)soak_boots);
   soak_write(header);
+  soak_arm_write(duration_s, hz, channels);
 
   rc = app_acq_start(1, hz);
   if (rc != 0)
   {
     soak_target_s = 0U;
     SOAK_BKP_TARGET_R = 0U;
+    soak_arm_clear();
     return -8;
   }
 
@@ -280,7 +500,12 @@ void app_soak_stop(void)
   }
   soak_active = 0;
   soak_target_s = 0U;
+  soak_record_pending = 0;
+  soak_stop_pending = 0;
+  soak_files_base = 0U;
   SOAK_BKP_TARGET_R = 0U;
+  SOAK_BKP_FILES_R = 0U;
+  soak_arm_clear();
 }
 
 void app_soak_report(void)
@@ -291,14 +516,14 @@ void app_soak_report(void)
   app_acq_get_stats(&stats);
   if ((soak_target_s != 0U) && (soak_elapsed_s < soak_target_s))
   {
-    hours_left = (soak_target_s - soak_elapsed_s) / 3600U;
+    hours_left = soak_target_s - soak_elapsed_s;
   }
 
-  app_log_printf("SOAK active=%d target=%s hours=%lu elapsed_s=%lu left_h=%lu "
+  app_log_printf("SOAK active=%d target=%s duration_s=%lu elapsed_s=%lu left_s=%lu "
                  "records=%lu\r\n",
                  soak_active,
                  (app_acq_target_name() != NULL) ? app_acq_target_name() : "-",
-                 (unsigned long)(soak_target_s / 3600U),
+                 (unsigned long)soak_target_s,
                  (unsigned long)soak_elapsed_s,
                  (unsigned long)hours_left,
                  (unsigned long)soak_records);

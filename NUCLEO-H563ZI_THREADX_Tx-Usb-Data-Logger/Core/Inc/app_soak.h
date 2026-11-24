@@ -20,12 +20,24 @@
  */
 
 void app_soak_system_init(void);
-/* Called from the monitor thread; cheap when no soak is running. */
-void app_soak_poll(void);
 
-/* hours 1..APP_SOAK_HOURS_MAX; sets channels and the rotation budget, arms the
-   ledger, writes the header and starts the capture. */
-int app_soak_start(uint32_t hours, uint32_t hz, uint32_t channels);
+/* Two halves on purpose. poll() runs in the monitor thread every tick and only
+   does arithmetic: putting the snprintf + FileX write path there overflowed its
+   2 KB stack (CFSR STKOF, caught by hardware). service() runs in the console
+   thread, which already owns the 4 KB stack that file commands use. */
+void app_soak_poll(void);
+void app_soak_service(void);
+
+/* duration_s is the whole run, not just whole hours: a five minute trial has to
+   exercise the same path as an eight hour one. Sets channels and the rotation
+   budget, arms the ledger, writes the header and starts the capture. */
+#define APP_SOAK_MIN_SECONDS    30U
+int app_soak_start(uint32_t duration_s, uint32_t hz, uint32_t channels);
+/* Called once at boot from the console thread, after the file systems are up.
+   If SOAK.ARM is on the card the run continues with the remaining time, which
+   is what makes swapping the power source safe: a power cycle clears the
+   backup domain, so the arm state has to live on the media. */
+void app_soak_boot_resume(void);
 void app_soak_stop(void);
 void app_soak_report(void);
 

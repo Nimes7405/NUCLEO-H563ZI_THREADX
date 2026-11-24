@@ -31,6 +31,10 @@ int app_acq_start(int use_dma, uint32_t hz);
 int app_acq_set_files(uint32_t max_bytes, uint32_t keep);
 uint32_t app_acq_file_max_bytes(void);
 uint32_t app_acq_file_keep(void);
+/* Continue at `index` instead of restarting the name ring at LOG0000: after a
+   reset the next file must not overwrite evidence the previous boot wrote.
+   Refused while capturing. */
+int app_acq_resume_index(uint32_t index);
 /* 1..APP_ACQ_CH_MAX; refused while a capture is running. */
 int app_acq_set_channels(uint32_t nch);
 uint32_t app_acq_channels(void);

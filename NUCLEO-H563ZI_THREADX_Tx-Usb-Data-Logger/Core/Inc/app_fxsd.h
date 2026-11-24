@@ -29,6 +29,11 @@ int app_fxsd_format(uint32_t sectors);
 void app_fxsd_report(void);
 int app_fxsd_list(void);
 int app_fxsd_write_file(const char *name, const char *text, int append);
+/* Append without flushing the media. Callers that write small records next to a
+   busy capture file use this: fx_media_flush blocks the acquisition writer long
+   enough to overflow its queue, and the next capture flush persists this data
+   anyway. */
+int app_fxsd_append_lazy(const char *name, const char *text);
 int app_fxsd_read_file(const char *name, char *out, uint32_t max, uint32_t *out_len);
 int app_fxsd_delete(const char *name);
 
