@@ -529,6 +529,66 @@ ADC 序列扫描（TIM3 每触发一次扫完 N 路）
 | 一键自检 | `./scripts/selfcheck.sh all`：`basic` 10、`fs` 19、`acq` 42、`mch` 36、`dma` 20、`rtc` 19、`usb` 9（需接线）、`watchdog` 4、`fault` 5 |
 | USB 栈 | `USB ready=1 connected=0`：USBX 初始化成功，未插线时按未连接处理，不影响其余八组 |
 
+## 长跑（soak）
+
+长跑**不需要主机常开**：验收要的三件事都能在板子自己身上完成。
+
+| 验收项 | 凭据 | 为什么不需要主机 |
+| --- | --- | --- |
+| 采样零丢失 | CSV 里的 `idx` 连续 + `samples == windows x 500 x nch` | `acq check` 事后一次性验 |
+| 有没有中途复位 | `TAMP->BKP8R..13R` 里的账本（跨复位保持） | 复位次数与原因写在备份域 |
+| 有没有泄漏 | `SOAK.LOG` 里周期性记录的栈水位与计数器 | 事后看趋势 |
+
+### 用法
+
+```sh
+acq target sd              # 先挂载卡（必需）
+soak start 8 10000 4       # 8 小时 / 10 kHz / 4 通道
+#  —— 拔掉主机，插手机充电器，等 8 小时 ——
+soak report                # 插回主机后看账本
+acq check                  # 校验 CSV 的序号与时间戳
+fs read SOAK.LOG           # 看计数器与栈水位趋势
+```
+
+`soak start <小时> [hz] [ch]` 会按运行时长自动算轮转预算（4 MB x N 个文件），
+保证整个运行期间**不会因为环形覆盖丢掉早期证据**。启动时还会写一行
+`#SOAK1 ...` 头，记录速率、通道数、轮转参数和本次启动的复位原因。
+
+### 为什么轮转参数要可配
+
+```c
+#define APP_ACQ_FILE_KEEP 4U     // 只有 LOG0000..LOG0003
+```
+
+默认配置是**环形缓冲**：只保留最近 4 MB。日常够用，但长跑会覆盖早期数据——
+4 通道 10 kHz 下 4 MB 只能保留 33 分钟。所以 `acq files <bytes> <keep>` 把预算
+做成运行时可设：
+
+| 配置 | 保留量 | 4ch/10kHz 可覆盖 |
+| --- | --- | --- |
+| 1 MB x 4（默认） | 4 MB | 33 分钟 |
+| 4 MB x 12（soak 自动） | 48 MB | 9.3 小时 |
+| 4 MB x 24（上限） | 96 MB | 18.5 小时 |
+
+### 存储实测量（4 通道 10 kHz）
+
+```
+窗口 = 500 帧 = 50 ms → 20 窗口/秒；行约 72 B
+20 x 72 B = 1440 B/s = 5.2 MB/小时
+8 小时 = 41.5 MB     24 小时 = 124 MB
+```
+
+所以：**8 小时用 1 GB 卡余量充足；24 小时不要用 128 MB 卡**（几乎占满）。
+`SOAK.LOG` 每 5 分钟一行约 130 B，8 小时才 12.5 KB，可忽略。
+
+### soak 期间不打印
+
+没有主机消费串口时，ST-LINK 的 VCP 缓冲会积压，`HAL_UART_Transmit` 每次都要等
+200 ms 超时，会拖慢 logger 线程。所以 soak 期间自动关闭 `STATUS` 与
+`PROD_A/PROD_B` 的周期性输出（`app_soak_quiet()`），`soak stop` 后恢复。
+
+> 注意：soak 运行期间不要跑 `selfcheck`，它依赖 `STATUS` 输出。
+
 ## 串口命令
 
 USART3（ST-LINK 虚拟串口，PD8/PD9，115200 8N1）。文件系统命令与
@@ -553,6 +613,9 @@ USART3（ST-LINK 虚拟串口，PD8/PD9，115200 8N1）。文件系统命令与
 | `dma env` / `dma test` | GPDMA 通道属性 / 受 TrustZone 影响的安全属性矩阵 |
 | `usb` | USB 状态：栈是否就绪、主机是否已配置、CDC 收发字节数与丢弃数 |
 | `dump <name>` | 把文件内容从 CDC 端口原样推给主机（`cat /dev/ttyACM1 > f.csv`） |
+| `acq files [<bytes> <keep>]` | 查看/设置轮转预算，footprint = bytes x keep |
+| `soak start <h> [hz] [ch]` | 启动无人值守长跑（需要 SD 已挂载） |
+| `soak stop` / `soak report` | 结束长跑 / 读账本与统计 |
 
 ## 一键自检
 

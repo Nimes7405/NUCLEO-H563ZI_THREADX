@@ -12,6 +12,10 @@
 #define APP_ACQ_FILE_KEEP       4U
 /* Rotation limit on a real card, where space is not the constraint. */
 #define APP_ACQ_SD_FILE_MAX_BYTES  (1024U * 1024U)
+/* Bounds for the runtime rotation budget (`acq files`). files x bytes is the
+   retained footprint: 12 x 4 MB covers an 8 h run at 4 channels / 10 kHz. */
+#define APP_ACQ_FILE_KEEP_MAX      32U
+#define APP_ACQ_FILE_MAX_BYTES_LIMIT  (16U * 1024U * 1024U)
 
 #define APP_ACQ_TARGET_SIM      0
 #define APP_ACQ_TARGET_SD       1
@@ -23,6 +27,10 @@ void app_acq_writer_entry(unsigned long thread_input);
 /* use_dma: 0 = ADC end-of-conversion interrupt, 1 = GPDMA circular transfer.
    hz: 0 keeps the current rate, otherwise 1000..100000 Hz. */
 int app_acq_start(int use_dma, uint32_t hz);
+/* Rotation budget: files x max_bytes retained. Refused while capturing. */
+int app_acq_set_files(uint32_t max_bytes, uint32_t keep);
+uint32_t app_acq_file_max_bytes(void);
+uint32_t app_acq_file_keep(void);
 /* 1..APP_ACQ_CH_MAX; refused while a capture is running. */
 int app_acq_set_channels(uint32_t nch);
 uint32_t app_acq_channels(void);
@@ -30,6 +38,26 @@ uint32_t app_acq_channels(void);
 int app_acq_demux_selftest(void);
 void app_acq_stop(void);
 int app_acq_running(void);
+
+/* Snapshot of the counters a long run has to prove never moved in the wrong
+   direction. `last_index` is the most recently logged window index. */
+typedef struct
+{
+  uint32_t windows;
+  uint32_t samples;
+  uint32_t drops;
+  uint32_t dma_overruns;
+  uint32_t queue_drops;
+  uint32_t files;
+  uint32_t last_index;
+  uint32_t media_errors;
+  uint32_t rate_hz;
+  uint32_t channels;
+  uint32_t running;
+  uint32_t dma_mode;
+} app_acq_stats_t;
+
+void app_acq_get_stats(app_acq_stats_t *out);
 void app_acq_report(void);
 /* Software-triggered one-shot conversion; also accepts internal channels such
    as ADC_CHANNEL_VREFINT.  Refused while a capture is running. */

@@ -20,7 +20,8 @@
 typedef char acq_ring_pow2_check[(ACQ_RING_SAMPLES & (ACQ_RING_SAMPLES - 1U)) == 0U ? 1 : -1];
 typedef char acq_ring_fit_check[(ACQ_RING_SAMPLES >=
                                  (2U * APP_ACQ_CH_MAX * APP_ACQ_WINDOW_FRAMES)) ? 1 : -1];
-#define ACQ_NAME_LEN        16U
+/* "LOGnnnn.CSV" plus the worst-case digits of a 32-bit index. */
+#define ACQ_NAME_LEN        24U
 #define ACQ_LINE_MAX        160U
 
 /* TIM3 runs from 250 MHz / (PSC + 1). */
@@ -164,6 +165,11 @@ static const acq_media_ops_t acq_media_sd = {
 
 static const acq_media_ops_t *acq_media = &acq_media_sim;
 static uint32_t acq_file_max_bytes = APP_ACQ_FILE_MAX_BYTES;
+/* Rotation is a footprint budget: files x max_bytes is what the medium keeps.
+   A long run needs both raised, so they are settable at runtime and the size
+   requested explicitly survives an `acq target` switch. */
+static uint32_t acq_file_keep = APP_ACQ_FILE_KEEP;
+static uint32_t acq_file_max_override;
 
 static TX_QUEUE acq_queue;
 static ULONG acq_queue_mem[ACQ_QUEUE_DEPTH * (sizeof(acq_record_t) / sizeof(ULONG))];
@@ -531,8 +537,10 @@ static int acq_open_file(void)
 {
   int rc;
 
+  /* The slot is bounded by keep (<= APP_ACQ_FILE_KEEP_MAX), so the name stays
+     short even though keep is a runtime value. */
   snprintf(acq_current, sizeof(acq_current), "LOG%04lu.CSV",
-           (unsigned long)(acq_file_index % APP_ACQ_FILE_KEEP));
+           (unsigned long)((acq_file_index % acq_file_keep) & 0x7FU));
 
   rc = acq_media->log_open(acq_current);
   if (rc != 0)
@@ -561,7 +569,7 @@ static int acq_open_file(void)
   }
 
   acq_file_index++;
-  if (acq_files_created < APP_ACQ_FILE_KEEP)
+  if (acq_files_created < acq_file_keep)
   {
     acq_files_created++;
   }
@@ -1072,6 +1080,26 @@ int app_acq_demux_selftest(void)
   app_log_printf("ACQ DEMUX %s channels=%lu failures=%d\r\n",
                  (failures == 0) ? "PASS" : "FAIL", (unsigned long)nch, failures);
   return failures;
+}
+
+void app_acq_get_stats(app_acq_stats_t *out)
+{
+  if (out == NULL)
+  {
+    return;
+  }
+  out->windows = acq_windows_done;
+  out->samples = acq_samples_done;
+  out->drops = acq_ring_drops;
+  out->dma_overruns = acq_dma_overruns;
+  out->queue_drops = acq_windows_dropped;
+  out->files = acq_files_created;
+  out->last_index = (acq_last_record_valid != 0U) ? acq_last_record.index : 0U;
+  out->media_errors = acq_media_errors;
+  out->rate_hz = acq_rate_hz;
+  out->channels = acq_eval_channels;
+  out->running = acq_running;
+  out->dma_mode = (acq_mode == ACQ_MODE_DMA) ? 1U : 0U;
 }
 
 void app_acq_report(void)
@@ -1675,14 +1703,62 @@ int app_acq_set_target(int target)
     acq_media = &acq_media_sd;
     /* A card has room for a lot more than the simulated disk, and rotating
        every 4 KB would cost a file create per second at high rates. */
-    acq_file_max_bytes = APP_ACQ_SD_FILE_MAX_BYTES;
+    acq_file_max_bytes = (acq_file_max_override != 0U)
+                             ? acq_file_max_override
+                             : APP_ACQ_SD_FILE_MAX_BYTES;
   }
   else
   {
     acq_media = &acq_media_sim;
-    acq_file_max_bytes = APP_ACQ_FILE_MAX_BYTES;
+    acq_file_max_bytes = (acq_file_max_override != 0U)
+                             ? acq_file_max_override
+                             : APP_ACQ_FILE_MAX_BYTES;
   }
   return 0;
+}
+
+/* Rotation budget: files x max_bytes is the retained footprint. Refused while
+   a capture is running, because the current file's rotation point would move
+   underneath the writer. */
+int app_acq_set_files(uint32_t max_bytes, uint32_t keep)
+{
+  if (acq_running != 0U)
+  {
+    return -1;
+  }
+  if (keep < 1U)
+  {
+    return -2;
+  }
+  if (keep > APP_ACQ_FILE_KEEP_MAX)
+  {
+    return -2;
+  }
+  if (max_bytes < APP_ACQ_FILE_MAX_BYTES)
+  {
+    return -3;
+  }
+  if (max_bytes > APP_ACQ_FILE_MAX_BYTES_LIMIT)
+  {
+    return -3;
+  }
+
+  acq_file_max_override = max_bytes;
+  acq_file_max_bytes = max_bytes;
+  acq_file_keep = keep;
+  acq_file_index = 0U;
+  acq_files_created = 0U;
+  return 0;
+}
+
+uint32_t app_acq_file_max_bytes(void)
+{
+  return acq_file_max_bytes;
+}
+
+uint32_t app_acq_file_keep(void)
+{
+  return acq_file_keep;
 }
 
 const char *app_acq_target_name(void)

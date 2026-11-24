@@ -131,6 +131,7 @@ APP_SRCS = \
 	Core/Src/app_fxsd.c \
 	Core/Src/app_dma.c \
 	Core/Src/app_usb.c \
+	Core/Src/app_soak.c \
 	Core/Src/syscalls.c \
 	Core/Src/stm32h5xx_hal_msp.c \
 	Core/Src/stm32h5xx_hal_timebase_tim.c \

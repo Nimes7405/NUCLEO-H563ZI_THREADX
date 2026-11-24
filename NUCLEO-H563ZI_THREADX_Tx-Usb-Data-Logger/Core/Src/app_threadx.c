@@ -5,6 +5,7 @@
 #include "app_fxsd.h"
 #include "app_log.h"
 #include "app_stacks.h"
+#include "app_soak.h"
 #include "app_usb.h"
 #include "app_watchdog.h"
 
@@ -42,6 +43,7 @@ void tx_application_define(VOID *first_unused_memory)
   app_fxsd_system_init();
   app_acq_system_init();
   app_usb_system_init();
+  app_soak_system_init();
 
   app_stacks_bind(APP_STK_MONITOR, monitor_stack, sizeof(monitor_stack));
   app_stacks_bind(APP_STK_LOGGER, logger_stack, sizeof(logger_stack));
@@ -133,8 +135,11 @@ static void monitor_entry(ULONG thread_input)
   {
     app_hb_mark(APP_HB_MONITOR);
     (void)app_watchdog_poll();
+    app_soak_poll();
 
-    if ((loops % 50U) == 0U)
+    /* A soak runs with no serial consumer, so the periodic status lines would
+       only clog the log ring and the blocking UART writes. */
+    if ((app_soak_quiet() == 0) && ((loops % 50U) == 0U))
     {
       app_console_status();
     }
@@ -167,7 +172,7 @@ static void prod_a_entry(ULONG thread_input)
   {
     app_hb_mark(APP_HB_PROD_A);
     HAL_GPIO_TogglePin(APP_LED_GREEN_GPIO_Port, APP_LED_GREEN_Pin);
-    if ((n % 20U) == 0U)
+    if ((app_soak_quiet() == 0) && ((n % 20U) == 0U))
     {
       app_log_printf("PROD_A alive n=%lu\r\n", (unsigned long)n);
     }
@@ -184,7 +189,7 @@ static void prod_b_entry(ULONG thread_input)
   for (;;)
   {
     app_hb_mark(APP_HB_PROD_B);
-    if ((n % 10U) == 0U)
+    if ((app_soak_quiet() == 0) && ((n % 10U) == 0U))
     {
       app_log_printf("PROD_B counter=%lu\r\n", (unsigned long)n);
     }

@@ -9,6 +9,7 @@
 #include "app_fxsd.h"
 #include "app_rtc.h"
 #include "app_stacks.h"
+#include "app_soak.h"
 #include "app_usb.h"
 #include "app_watchdog.h"
 
@@ -44,6 +45,7 @@ static void console_sd_locked(const char *arg);
 static void console_stall(const char *arg);
 static void console_usb(const char *arg);
 static void console_dump(const char *arg);
+static void console_soak(const char *arg);
 static void console_feed(char c, char *line, uint32_t *len);
 
 void app_console_init(void)
@@ -204,7 +206,7 @@ void app_console_status(void)
 
 static void console_help(void)
 {
-  app_log_printf("HELP commands: status stack fault wdg log <text> fs <info|ls|format|mount|umount|write|append|read|rm|test|fill|stress> rtc <info|set YYYY-MM-DD HH:MM:SS> acq <info|hwcheck [ext]|target <sim|sd>|start [dma|irq] [hz]|stop|check|selftest|ch [1-4]|demux|level [0-19]|dac [0-4095]> sd <raw|fs> dma <env|test> usb [regs|cc] dump <name> stall <0|1|2> crash reboot\r\n");
+  app_log_printf("HELP commands: status stack fault wdg log <text> fs <info|ls|format|mount|umount|write|append|read|rm|test|fill|stress> rtc <info|set YYYY-MM-DD HH:MM:SS> acq <info|hwcheck [ext]|target <sim|sd>|start [dma|irq] [hz]|stop|check|selftest|ch [1-4]|demux|files [bytes keep]|level [0-19]|dac [0-4095]> sd <raw|fs> dma <env|test> usb [regs|cc] dump <name> soak <start h [hz] [ch]|stop|report> stall <0|1|2> crash reboot\r\n");
 }
 
 static void console_fault_report(void)
@@ -312,6 +314,49 @@ static void console_acq(const char *arg)
   if (strcmp(arg, "demux") == 0)
   {
     (void)app_acq_demux_selftest();
+    return;
+  }
+
+  if (strncmp(arg, "files", 5) == 0)
+  {
+    const char *rest = arg + 5;
+
+    while (*rest == ' ')
+    {
+      rest++;
+    }
+    if (*rest == '\0')
+    {
+      app_log_printf("ACQ files max_bytes=%lu keep=%lu footprint=%lu\r\n",
+                     (unsigned long)app_acq_file_max_bytes(),
+                     (unsigned long)app_acq_file_keep(),
+                     (unsigned long)(app_acq_file_max_bytes() * app_acq_file_keep()));
+      return;
+    }
+
+    char *end = NULL;
+    unsigned long max_bytes = strtoul(rest, &end, 10);
+    unsigned long keep = 0UL;
+
+    if (end != NULL)
+    {
+      while (*end == ' ')
+      {
+        end++;
+      }
+      keep = strtoul(end, NULL, 10);
+    }
+
+    int rc = app_acq_set_files((uint32_t)max_bytes, (uint32_t)keep);
+    app_log_printf("ACQ files max_bytes=%lu keep=%lu footprint=%lu rc=%d\r\n",
+                   (unsigned long)app_acq_file_max_bytes(),
+                   (unsigned long)app_acq_file_keep(),
+                   (unsigned long)(app_acq_file_max_bytes() * app_acq_file_keep()),
+                   rc);
+    if (rc == -1)
+    {
+      app_log_printf("ACQ ERR files-locked-while-capturing\r\n");
+    }
     return;
   }
 
@@ -1143,6 +1188,10 @@ static void console_dispatch(char *line)
   {
     console_dma(line + 3);
   }
+  else if (strncmp(line, "soak", 4) == 0)
+  {
+    console_soak(line + 4);
+  }
   else if (strncmp(line, "usb", 3) == 0)
   {
     console_usb(line + 3);
@@ -1263,4 +1312,79 @@ static void console_dump(const char *arg)
     app_log_printf("DUMP failed name=%s rc=%d\r\n", name, rc);
   }
   (void)app_usb_flush(20U);
+}
+
+static void console_soak(const char *arg)
+{
+  while (*arg == ' ')
+  {
+    arg++;
+  }
+
+  if (strcmp(arg, "report") == 0)
+  {
+    app_soak_report();
+    return;
+  }
+
+  if (strcmp(arg, "stop") == 0)
+  {
+    app_soak_stop();
+    app_log_printf("SOAK stop=ok\r\n");
+    app_soak_report();
+    return;
+  }
+
+  if (strncmp(arg, "start", 5) == 0)
+  {
+    const char *opt = arg + 5;
+    unsigned long hours;
+    unsigned long hz = 10000UL;
+    unsigned long ch = APP_ACQ_CH_MAX;
+
+    while (*opt == ' ')
+    {
+      opt++;
+    }
+    if (*opt == '\0')
+    {
+      app_log_printf("ERR usage: soak start <hours> [hz] [ch]\r\n");
+      return;
+    }
+
+    char *end = NULL;
+    hours = strtoul(opt, &end, 10);
+    if (end != NULL)
+    {
+      while (*end == ' ')
+      {
+        end++;
+      }
+      if (*end != '\0')
+      {
+        hz = strtoul(end, &end, 10);
+        while (*end == ' ')
+        {
+          end++;
+        }
+        if (*end != '\0')
+        {
+          ch = strtoul(end, NULL, 10);
+        }
+      }
+    }
+
+    int rc = app_soak_start((uint32_t)hours, (uint32_t)hz, (uint32_t)ch);
+    app_log_printf("SOAK start=%s rc=%d\r\n", (rc == 0) ? "ok" : "fail", rc);
+    if (rc != 0)
+    {
+      app_log_printf("SOAK ERR rc=%d (1 hours, 2 hz, 3 ch, 4 already-capturing, "
+                     "5 sd-not-mounted, 6 ch-set, 7 rotation, 8 acq-start)\r\n", rc);
+      return;
+    }
+    app_soak_report();
+    return;
+  }
+
+  app_log_printf("ERR usage: soak <start h [hz] [ch]|stop|report>\r\n");
 }
