@@ -7,6 +7,7 @@ extern "C" {
 
 void TIM6_IRQHandler(void);
 void USART3_IRQHandler(void);
+void USB_DRD_FS_IRQHandler(void);
 
 #ifdef __cplusplus
 }

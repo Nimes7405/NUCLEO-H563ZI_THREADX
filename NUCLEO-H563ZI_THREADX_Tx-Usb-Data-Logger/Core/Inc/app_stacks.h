@@ -12,6 +12,8 @@ typedef enum
   APP_STK_PROD_B,
   APP_STK_SAMPLER,
   APP_STK_WRITER,
+  APP_STK_USB_RX,
+  APP_STK_USB_TX,
   APP_STK_COUNT
 } app_stack_id_t;
 

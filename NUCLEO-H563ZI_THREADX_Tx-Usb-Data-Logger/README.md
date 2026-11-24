@@ -4,13 +4,15 @@
 
 从 [`Tx-Data-Logger`](../NUCLEO-H563ZI_THREADX_Tx-Data-Logger/README.md)（提交
 `c73626d`）派生，原样保留它已验证的 ADC 序列扫描、GPDMA 交织、FileX+LevelX、
-SD（SPI 模式）、RTC 时间戳与八组自检，在此基础上加 **USBX 复合设备**。
+SD（SPI 模式）、RTC 时间戳与八组自检，在此基础上加 **USBX CDC 命令通道**
+（MSC 数据盘是下一步）。
 
 对应 [Application Note](../Application_note.md) 路线 2 的 P3：把"拔卡取数 +
 UART 命令"升级为"一根 USB-C 同时提供 MSC 数据盘与 CDC 命令通道"。
 
-> **当前状态：基线迁移完成。** 业务代码与 `Tx-Data-Logger` 完全一致，尚未加
-> USBX；先确认派生工程能编译、能烧写、自检全通过，再动 USB 相关代码。
+> **当前状态：P3-1（CDC 命令通道）代码完成。** USBX 设备栈、CDC-ACM 类、
+> `usb`/`dump` 命令与 `usb` 自检组已就位；其余八组自检在链接了 USBX 后仍全
+> PASS。等待插线验证枚举与端到端导出。
 
 ## 与上游 Tx-Data-Logger 的关系
 
@@ -523,7 +525,8 @@ ADC 序列扫描（TIM3 每触发一次扫完 N 路）
 | 4 通道 100 kHz | 3.3 s：`windows=668 samples=1336000 drop=0 dma_ovr=0 qdrop=0`，即 **400 k 样本/秒零丢失** |
 | CSV 内容 | `281,500,4,422,582,501,425,615,519,438,591,516,452,612,525` |
 | 线程栈 | `sampler=400/2048`、`writer=1544/3072`、`console=1444/4096`、`monitor=1008/2048` |
-| 一键自检 | `./scripts/selfcheck.sh all`：`basic` 10、`fs` 19、`acq` 42、`mch` 36、`dma` 20、`rtc` 19、`watchdog` 4、`fault` 5 全 PASS |
+| 一键自检 | `./scripts/selfcheck.sh all`：`basic` 10、`fs` 19、`acq` 42、`mch` 36、`dma` 20、`rtc` 19、`usb` 9（需接线）、`watchdog` 4、`fault` 5 |
+| USB 栈 | `USB ready=1 connected=0`：USBX 初始化成功，未插线时按未连接处理，不影响其余八组 |
 
 ## 串口命令
 
@@ -547,6 +550,8 @@ USART3（ST-LINK 虚拟串口，PD8/PD9，115200 8N1）。文件系统命令与
 | `acq dac [0-4095]` | 用 `DAC1_OUT1`(PA4) 驱动 `ADC1_INP18` 回环，验证外部通道能否读到电压 |
 | `acq selftest` | 采集 1.5 s → 停止 → 校验 |
 | `dma env` / `dma test` | GPDMA 通道属性 / 受 TrustZone 影响的安全属性矩阵 |
+| `usb` | USB 状态：栈是否就绪、主机是否已配置、CDC 收发字节数与丢弃数 |
+| `dump <name>` | 把文件内容从 CDC 端口原样推给主机（`cat /dev/ttyACM1 > f.csv`） |
 
 ## 一键自检
 
@@ -557,12 +562,75 @@ USART3（ST-LINK 虚拟串口，PD8/PD9，115200 8N1）。文件系统命令与
 ./scripts/selfcheck.sh rtc       # RTC 走时 + 设置/拒绝非法值 + CSV 头与时间戳单调性，19 项断言
 ./scripts/selfcheck.sh mch       # 解交织 + 中断拒绝 + 2/4 通道 DMA，36 项断言
 ./scripts/selfcheck.sh dma       # GPDMA 属性矩阵 + 采集自愈，20 项断言
+./scripts/selfcheck.sh usb       # USB CDC 枚举 + 命令往返 + dump 导出
 ./scripts/selfcheck.sh watchdog  # 线程卡死 → IWDG 复位
 ./scripts/selfcheck.sh fault     # BusFault 记录与重启报告
-./scripts/selfcheck.sh all       # 八组顺序执行
+./scripts/selfcheck.sh all       # 九组顺序执行
 ```
 
 可用 `PORT=/dev/ttyACM0` 覆盖串口。
+
+`usb` 组需要**用户 USB-C 口接到主机**（不是 ST-LINK 那个）。没插线时该组输出
+`SKIP usb: no CDC port found` 并以退出码 2 退出，`all` 会把它记为 SKIP 继续跑；
+发布前用 `STRICT=1 ./scripts/selfcheck.sh all` 让"没插线"变成失败。
+
+## USB CDC 命令通道
+
+### 一根线，两个通道
+
+CDC-ACM 让主机把它当成一个串口（Linux `/dev/ttyACM1`、Windows `COMx`、
+macOS `/dev/cu.usbmodem*`）。它和 USART3 **并行**存在：
+
+- 输入：两个通道各有独立的行缓冲，但都在 `console` 线程里解析，最终调用同一个
+  `console_dispatch()`。所以命令语义完全一致，且不会有两个线程同时进命令处理。
+- 输出：`app_log_drain()` 把同一份字节既写 UART 也写 USB，USB 侧是**异步**的
+  （进环形缓冲，由 `usb_tx` 线程发出）。主机没接或读得慢时只会丢 USB 的字节，
+  UART 不受影响。
+
+### 端点分配
+
+| 端点 | 方向 | 类型 | 用途 |
+| --- | --- | --- | --- |
+| EP0 | 双向 | Control | 枚举、类请求（`SET_LINE_CODING` 等） |
+| 0x81 | IN | Interrupt | 串口状态通知 |
+| 0x02 | OUT | Bulk | 主机 → 设备（RX） |
+| 0x83 | IN | Bulk | 设备 → 主机（TX） |
+
+描述符是**手写**的（`app_usb.c` 里 85 字节的 `usb_device_framework`），没有引
+ST 的 `usb_desc` builder。原因：那个 builder 单个文件 766–1021 行，为了"任意
+类组合"做了大量运行时拼装；本项目只有一个类，手写 85 字节既看得懂也改得动，
+出问题时可以直接对着 USB 规范逐字段核。设备类在**设备描述符**里声明为 CDC，
+只用一个功能所以**不需要 IAD**。
+
+### 为什么读写都要设超时
+
+`ux_device_class_cdc_acm_read()` 默认会在 USBX 内部等到 `UX_NON_CONTROL_TRANSFER_TIMEOUT`
+（50 s）。而看门狗按 **1.5 s 无心跳**判定线程卡死——一个空闲但正常的 USB 链路
+就会被误判成故障并复位板子。
+
+所以激活回调里用 `SET_READ_TIMEOUT` / `SET_WRITE_TIMEOUT` 把超时压到
+100 ms / 200 ms（单位是 tick）：读线程最多阻塞 100 ms 就能回来打心跳，链路空闲
+与链路故障因此在看门狗眼里都不再是"卡死"。
+
+### `dump` 的时序
+
+`dump` 用 `app_fxdisk_read_stream()` 一边读文件一边把 256 字节块直接写进 CDC
+（阻塞写），**不经过日志环**。为了保证文件字节不被日志插进来打断：
+
+1. `app_usb_flush()` + 2 tick 让已排队的日志先发出去
+2. 置 `usb_dump_active`，`app_log_drain()` 的 USB 镜像与 `usb_tx` 线程同时让路
+3. 阻塞发送 `DUMP begin ...`、文件字节、然后清标志
+4. 结束后 `DUMP ok name=... bytes=N` 走正常日志路径，两个通道都能看到
+
+整个过程持有 `app_fxdisk_lock()`，因此 writer 线程不会在导出途中改动这个文件。
+
+### 资源占用
+
+| 项 | 增量 |
+| --- | --- |
+| Flash | +37.7 KB（`text` 209,316 → 247,084） |
+| RAM | +22.4 KB（`bss` 155,464 → 177,904），其中 12 KB 是 USBX 内存池 |
+| 线程 | `usb_rx`（2048 B 栈，含一次性 USBX 初始化）、`usb_tx`（1536 B 栈） |
 
 ## 已知限制
 
@@ -572,6 +640,11 @@ USART3（ST-LINK 虚拟串口，PD8/PD9，115200 8N1）。文件系统命令与
   改成运行时可写，并处理各通道采样时间差异。
 - 模拟盘掉电即失；RTC 未接，日志没有绝对时间戳。
 - `fs fill` / `fs stress` 是调试命令，量产固件应裁掉。
+- USB 只有 CDC-ACM：还没有 MSC 数据盘，导出仍需 `dump` 命令而不是直接拷盘。
+- USB 侧输出是尽力而为：主机读得慢会丢 USB 字节（`usb` 命令里的 `tx_drop`），
+  UART 不受影响。`dump` 是例外，它用阻塞写，丢了会返回失败。
+- `dump` 全程持文件系统锁，导出大文件会让采集 writer 等待；P3-2 换成 MSC 后
+  需要先解决这个介质归属问题。
 - 4 通道 100 kHz 已零丢失，但不是硬实时保证：sampler 线程仍与 10 ms tick 对齐，
   再提高速率需要更高 tick 频率，或把采集搬出 RTOS 线程。
 

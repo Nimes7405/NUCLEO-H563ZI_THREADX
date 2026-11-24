@@ -23,22 +23,40 @@ echo "PASS symbols"
 
 make flash
 
+# Exit code 2 means the assertion set was skipped, not that it failed. Only the
+# usb group does that, and only when the host cable is absent; STRICT=1 turns
+# the skip into a failure so a release run cannot pass without the cable.
+run_group() {
+  local rc=0
+  python3 scripts/serial_check.py --port "$PORT" --mode "$1" || rc=$?
+  if [ "$rc" -eq 2 ]; then
+    if [ "${STRICT:-0}" = "1" ]; then
+      echo "FAIL $1: skipped but STRICT=1"
+      exit 1
+    fi
+    echo "SKIP $1"
+    return 0
+  fi
+  return "$rc"
+}
+
 case "$MODE" in
-  basic|fs|acq|mch|dma|rtc|watchdog|fault)
-    python3 scripts/serial_check.py --port "$PORT" --mode "$MODE"
+  basic|fs|acq|mch|dma|rtc|usb|watchdog|fault)
+    run_group "$MODE"
     ;;
   all)
-    python3 scripts/serial_check.py --port "$PORT" --mode basic
-    python3 scripts/serial_check.py --port "$PORT" --mode fs
-    python3 scripts/serial_check.py --port "$PORT" --mode acq
-    python3 scripts/serial_check.py --port "$PORT" --mode mch
-    python3 scripts/serial_check.py --port "$PORT" --mode dma
-    python3 scripts/serial_check.py --port "$PORT" --mode rtc
-    python3 scripts/serial_check.py --port "$PORT" --mode watchdog
-    python3 scripts/serial_check.py --port "$PORT" --mode fault
+    run_group basic
+    run_group fs
+    run_group acq
+    run_group mch
+    run_group dma
+    run_group rtc
+    run_group usb
+    run_group watchdog
+    run_group fault
     ;;
   *)
-    echo "usage: $0 [basic|fs|acq|mch|dma|rtc|watchdog|fault|all]" >&2
+    echo "usage: $0 [basic|fs|acq|mch|dma|rtc|usb|watchdog|fault|all]" >&2
     exit 2
     ;;
 esac

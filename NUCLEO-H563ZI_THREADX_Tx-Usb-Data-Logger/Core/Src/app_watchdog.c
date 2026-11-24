@@ -5,7 +5,8 @@
 IWDG_HandleTypeDef hiwdg;
 
 static const char *const hb_names[APP_HB_COUNT] = {
-    "monitor", "logger", "console", "prod_a", "prod_b", "sampler", "writer"};
+    "monitor", "logger", "console", "prod_a", "prod_b", "sampler", "writer",
+    "usb_rx", "usb_tx"};
 
 static volatile uint32_t hb_count[APP_HB_COUNT];
 static volatile uint8_t hb_sim_stall[APP_HB_COUNT];

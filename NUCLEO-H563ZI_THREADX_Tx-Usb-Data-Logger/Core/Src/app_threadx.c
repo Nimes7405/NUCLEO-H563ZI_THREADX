@@ -5,6 +5,7 @@
 #include "app_fxsd.h"
 #include "app_log.h"
 #include "app_stacks.h"
+#include "app_usb.h"
 #include "app_watchdog.h"
 
 static TX_THREAD monitor_thread;
@@ -14,6 +15,8 @@ static TX_THREAD prod_a_thread;
 static TX_THREAD prod_b_thread;
 static TX_THREAD sampler_thread;
 static TX_THREAD writer_thread;
+static TX_THREAD usb_rx_thread;
+static TX_THREAD usb_tx_thread;
 
 static UCHAR monitor_stack[APP_STACK_MONITOR] __attribute__((aligned(8)));
 static UCHAR logger_stack[APP_STACK_LOGGER] __attribute__((aligned(8)));
@@ -22,6 +25,8 @@ static UCHAR prod_a_stack[APP_STACK_PROD_A] __attribute__((aligned(8)));
 static UCHAR prod_b_stack[APP_STACK_PROD_B] __attribute__((aligned(8)));
 static UCHAR sampler_stack[APP_STACK_SAMPLER] __attribute__((aligned(8)));
 static UCHAR writer_stack[APP_STACK_WRITER] __attribute__((aligned(8)));
+static UCHAR usb_rx_stack[APP_STACK_USB_RX] __attribute__((aligned(8)));
+static UCHAR usb_tx_stack[APP_STACK_USB_TX] __attribute__((aligned(8)));
 
 static void monitor_entry(ULONG thread_input);
 static void logger_entry(ULONG thread_input);
@@ -36,6 +41,7 @@ void tx_application_define(VOID *first_unused_memory)
   app_fxdisk_system_init();
   app_fxsd_system_init();
   app_acq_system_init();
+  app_usb_system_init();
 
   app_stacks_bind(APP_STK_MONITOR, monitor_stack, sizeof(monitor_stack));
   app_stacks_bind(APP_STK_LOGGER, logger_stack, sizeof(logger_stack));
@@ -44,6 +50,8 @@ void tx_application_define(VOID *first_unused_memory)
   app_stacks_bind(APP_STK_PROD_B, prod_b_stack, sizeof(prod_b_stack));
   app_stacks_bind(APP_STK_SAMPLER, sampler_stack, sizeof(sampler_stack));
   app_stacks_bind(APP_STK_WRITER, writer_stack, sizeof(writer_stack));
+  app_stacks_bind(APP_STK_USB_RX, usb_rx_stack, sizeof(usb_rx_stack));
+  app_stacks_bind(APP_STK_USB_TX, usb_tx_stack, sizeof(usb_tx_stack));
 
   if (tx_thread_create(&monitor_thread, "monitor", monitor_entry, 0U,
                        monitor_stack, sizeof(monitor_stack),
@@ -92,6 +100,22 @@ void tx_application_define(VOID *first_unused_memory)
   if (tx_thread_create(&writer_thread, "writer", app_acq_writer_entry, 0U,
                        writer_stack, sizeof(writer_stack),
                        APP_PRIO_WRITER, APP_PRIO_WRITER,
+                       TX_NO_TIME_SLICE, TX_AUTO_START) != TX_SUCCESS)
+  {
+    Error_Handler();
+  }
+
+  if (tx_thread_create(&usb_rx_thread, "usb_rx", app_usb_rx_thread_entry, 0U,
+                       usb_rx_stack, sizeof(usb_rx_stack),
+                       APP_PRIO_USB_RX, APP_PRIO_USB_RX,
+                       TX_NO_TIME_SLICE, TX_AUTO_START) != TX_SUCCESS)
+  {
+    Error_Handler();
+  }
+
+  if (tx_thread_create(&usb_tx_thread, "usb_tx", app_usb_tx_thread_entry, 0U,
+                       usb_tx_stack, sizeof(usb_tx_stack),
+                       APP_PRIO_USB_TX, APP_PRIO_USB_TX,
                        TX_NO_TIME_SLICE, TX_AUTO_START) != TX_SUCCESS)
   {
     Error_Handler();

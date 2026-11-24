@@ -14,6 +14,7 @@ THREADX_DIR = $(CUBE_FW)/Middlewares/ST/threadx
 THREADX_PORT_DIR = $(THREADX_DIR)/ports/cortex_m33/gnu/src
 FILEX_DIR = $(CUBE_FW)/Middlewares/ST/filex
 LEVELX_DIR = $(CUBE_FW)/Middlewares/ST/levelx
+USBX_DIR = $(CUBE_FW)/Middlewares/ST/usbx
 DEVICE_DIR = $(CMSIS_DIR)/Device/ST/STM32H5xx
 
 THREADX_MODE ?= SECURE
@@ -33,6 +34,7 @@ CFLAGS = -mcpu=$(MCU) $(FPU) -mthumb -mcmse -Wall -Wextra -g $(OPT) -std=c99
 CFLAGS += -ffunction-sections -fdata-sections -MMD -MP
 CFLAGS += -DSTM32H563xx -DHSE_VALUE=8000000UL -DUSE_HAL_DRIVER
 CFLAGS += -DTX_INCLUDE_USER_DEFINE_FILE
+CFLAGS += -DUX_INCLUDE_USER_DEFINE_FILE
 CFLAGS += $(SECURITY_DEFINE)
 ASFLAGS = $(CFLAGS) -x assembler-with-cpp
 
@@ -50,7 +52,11 @@ INC_PATHS = \
 	-I$(THREADX_DIR)/ports/cortex_m33/gnu/inc \
 	-I$(FILEX_DIR)/common/inc \
 	-I$(FILEX_DIR)/ports/generic/inc \
-	-I$(LEVELX_DIR)/common/inc
+	-I$(LEVELX_DIR)/common/inc \
+	-I$(USBX_DIR)/common/core/inc \
+	-I$(USBX_DIR)/ports/generic/inc \
+	-I$(USBX_DIR)/common/usbx_stm32_device_controllers \
+	-I$(USBX_DIR)/common/usbx_device_classes/inc
 
 HAL_SRCS = \
 	$(HAL_DIR)/Src/stm32h5xx_hal.c \
@@ -66,6 +72,9 @@ HAL_SRCS = \
 	$(HAL_DIR)/Src/stm32h5xx_hal_gpio.c \
 	$(HAL_DIR)/Src/stm32h5xx_hal_pwr.c \
 	$(HAL_DIR)/Src/stm32h5xx_hal_pwr_ex.c \
+	$(HAL_DIR)/Src/stm32h5xx_hal_pcd.c \
+	$(HAL_DIR)/Src/stm32h5xx_hal_pcd_ex.c \
+	$(HAL_DIR)/Src/stm32h5xx_ll_usb.c \
 	$(HAL_DIR)/Src/stm32h5xx_hal_rcc.c \
 	$(HAL_DIR)/Src/stm32h5xx_hal_rtc.c \
 	$(HAL_DIR)/Src/stm32h5xx_hal_rtc_ex.c \
@@ -79,6 +88,12 @@ HAL_SRCS = \
 	$(HAL_DIR)/Src/stm32h5xx_hal_iwdg.c
 
 THREADX_SRCS = $(wildcard $(THREADX_DIR)/common/src/*.c)
+
+# USBX device side: core, the CDC-ACM class and the STM32 device controller
+# port. Host classes and the ECM/HID/DFU classes are not linked.
+USBX_SRCS = $(wildcard $(USBX_DIR)/common/core/src/*.c) \
+	$(wildcard $(USBX_DIR)/common/usbx_device_classes/src/ux_device_class_cdc_acm*.c) \
+	$(wildcard $(USBX_DIR)/common/usbx_stm32_device_controllers/*.c)
 
 # FileX core plus the LevelX NOR wear-leveling layer. The LevelX RAM simulator
 # is excluded because app_fxdisk.c provides its own simulated NOR backend.
@@ -111,6 +126,7 @@ APP_SRCS = \
 	Core/Src/app_rtc.c \
 	Core/Src/app_fxsd.c \
 	Core/Src/app_dma.c \
+	Core/Src/app_usb.c \
 	Core/Src/syscalls.c \
 	Core/Src/stm32h5xx_hal_msp.c \
 	Core/Src/stm32h5xx_hal_timebase_tim.c \
@@ -118,7 +134,7 @@ APP_SRCS = \
 	Core/Src/system_stm32h5xx.c
 
 ASM_SRCS = startup/startup_stm32h563xx.s $(THREADX_ASM_SRCS)
-OBJS = $(patsubst %.c,$(BUILD_DIR)/%.o,$(HAL_SRCS) $(APP_SRCS) $(THREADX_SRCS) $(FILEX_SRCS) $(LEVELX_SRCS))
+OBJS = $(patsubst %.c,$(BUILD_DIR)/%.o,$(HAL_SRCS) $(APP_SRCS) $(THREADX_SRCS) $(FILEX_SRCS) $(LEVELX_SRCS) $(USBX_SRCS))
 OBJS += $(patsubst %.S,$(BUILD_DIR)/%.o,$(THREADX_ASM_SRCS))
 OBJS += $(BUILD_DIR)/startup/startup_stm32h563xx.o
 DEPS = $(OBJS:.o=.d)

@@ -1,5 +1,6 @@
 #include "app_log.h"
 #include "app_config.h"
+#include "app_usb.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -160,5 +161,8 @@ uint32_t app_log_drain(void)
   __DMB();
   log_tail = tail + avail;
   uart_tx_blocking(buffer, avail);
+  /* Mirror to the USB CDC port when a host is attached. Asynchronous, so a
+     stalled or absent host costs nothing on the UART path. */
+  app_usb_write(buffer, avail);
   return avail;
 }

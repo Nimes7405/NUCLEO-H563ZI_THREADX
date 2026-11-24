@@ -2,6 +2,7 @@
 """Serial assertions for the Tx-Usb-Data-Logger firmware."""
 
 import argparse
+import glob
 import os
 import re
 import select
@@ -12,6 +13,7 @@ import time
 
 class Port:
     def __init__(self, path, baud):
+        self.path = path
         self.fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
         attrs = termios.tcgetattr(self.fd)
         cc = attrs[6]
@@ -467,12 +469,113 @@ def mode_rtc(port):
     return ok
 
 
+USB_INFO = re.compile(
+    r"USB ready=(\d) connected=(\d) rx=(\d+) tx=(\d+) rx_drop=(\d+) tx_drop=(\d+)")
+
+
+def find_cdc_port(uart_port):
+    """Return the ttyACM device that belongs to the device CDC function.
+
+    The ST-LINK virtual COM port and the CDC function of the target both show
+    up as /dev/ttyACM*, so the UART port is excluded. by-id names prefer the
+    interface-00 node, which is the one a plain video/CDC device registers.
+    """
+    candidates = []
+
+    by_id = "/dev/serial/by-id"
+    if os.path.isdir(by_id):
+        for name in sorted(os.listdir(by_id)):
+            if "STLINK" in name.upper():
+                continue
+            if "if00" not in name:
+                continue
+            link = os.path.realpath(os.path.join(by_id, name))
+            if link.startswith("/dev/ttyACM") and link != uart_port:
+                candidates.append(link)
+
+    if candidates:
+        return candidates[0]
+
+    for path in sorted(glob.glob("/dev/ttyACM*")):
+        if path != uart_port:
+            return path
+    return None
+
+
+def mode_usb(port):
+    """CDC-ACM virtual COM port: enumeration, command round trip and export.
+
+    Returns True, False, or None when the cable is not attached, so the caller
+    can report a skip instead of a failure.
+    """
+    port.drain_quiet()
+
+    port.clear()
+    port.send("usb")
+    ok = check(port, "usb-ready", port.wait_for("USB ready=1", 5.0), "USB ready=1")
+
+    cdc_path = find_cdc_port(port.path)
+    if cdc_path is None:
+        print("SKIP usb: no CDC port found; connect the user USB-C to the host")
+        return None
+    print(f"INFO usb cdc_port={cdc_path}")
+
+    cdc = Port(cdc_path, 115200)
+    try:
+        # A command typed on the CDC port must be answered on the CDC port:
+        # that proves the receive path, the shared dispatcher and the mirror.
+        cdc.read_for(0.3)
+        cdc.clear()
+        cdc.send("status")
+        ok &= check(cdc, "usb-cdc-status", cdc.wait_for("STATUS ver=", 5.0), "STATUS ver=")
+        cdc.clear()
+        cdc.send("usb")
+        ok &= check(cdc, "usb-cdc-report", cdc.wait_for("USB ready=1", 5.0),
+                    "USB ready=1 answered on the CDC port")
+
+        # Counters on both sides of the link must have moved.
+        port.clear()
+        port.send("usb")
+        port.read_for(0.8)
+        match = USB_INFO.search(port.text())
+        ok &= check(port, "usb-info", match is not None, "USB ready=... rx=... tx=...")
+        if match:
+            ok &= check(port, "usb-connected", match.group(2) == "1", "connected=1")
+            ok &= check(port, "usb-rx-seen", int(match.group(3)) > 0, "rx>0")
+            ok &= check(port, "usb-tx-seen", int(match.group(4)) > 0, "tx>0")
+
+        # Export path: write a small file through the UART console, then pull
+        # it out over CDC and look for the payload in the byte stream.
+        port.clear()
+        port.send("fs write USBDUMP.TXT USBDUMPMARKER42")
+        ok &= check(port, "usb-dump-file", port.wait_for("FS WROTE name=USBDUMP.TXT", 6.0),
+                    "FS WROTE name=USBDUMP.TXT")
+
+        cdc.clear()
+        cdc.send("dump USBDUMP.TXT")
+        ok &= check(cdc, "usb-dump-begin", cdc.wait_for("DUMP begin name=USBDUMP.TXT", 6.0),
+                    "DUMP begin name=USBDUMP.TXT")
+        ok &= check(cdc, "usb-dump-payload", cdc.wait_for("USBDUMPMARKER42", 6.0),
+                    "USBDUMPMARKER42 in the CDC stream")
+        ok &= check(cdc, "usb-dump-end", cdc.wait_for("DUMP ok name=USBDUMP.TXT", 6.0),
+                    "DUMP ok name=USBDUMP.TXT")
+
+        port.clear()
+        port.send("fs rm USBDUMP.TXT")
+        ok &= check(port, "usb-cleanup", port.wait_for("FS RM name=USBDUMP.TXT rc=0", 5.0),
+                    "FS RM name=USBDUMP.TXT rc=0")
+    finally:
+        cdc.close()
+
+    return ok
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", default="/dev/ttyACM0")
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--mode",
-                        choices=["basic", "fs", "acq", "mch", "dma", "rtc", "watchdog", "fault"],
+                        choices=["basic", "fs", "acq", "mch", "dma", "rtc", "usb", "watchdog", "fault"],
                         default="basic")
     args = parser.parse_args()
 
@@ -492,6 +595,8 @@ def main():
             ok = mode_dma(port)
         elif args.mode == "rtc":
             ok = mode_rtc(port)
+        elif args.mode == "usb":
+            ok = mode_usb(port)
         elif args.mode == "watchdog":
             ok = mode_watchdog(port)
         else:
@@ -499,6 +604,9 @@ def main():
     finally:
         port.close()
 
+    if ok is None:
+        print(f"RESULT {args.mode}: SKIP")
+        return 2
     if not ok:
         print("\n--- captured output ---")
         print(port.text()[-3000:])

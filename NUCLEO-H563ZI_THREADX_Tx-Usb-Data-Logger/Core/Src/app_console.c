@@ -9,6 +9,7 @@
 #include "app_fxsd.h"
 #include "app_rtc.h"
 #include "app_stacks.h"
+#include "app_usb.h"
 #include "app_watchdog.h"
 
 #include <stdlib.h>
@@ -25,6 +26,11 @@ static volatile uint32_t rx_dropped;
 static char line_buffer[APP_CON_LINE_SIZE];
 static uint32_t line_len;
 
+/* The USB CDC port gets its own assembler so a line typed on one channel can
+   never be spliced into a line being typed on the other. */
+static char usb_line_buffer[APP_CON_LINE_SIZE];
+static uint32_t usb_line_len;
+
 static void console_dispatch(char *line);
 static void console_fault_report(void);
 static void console_help(void);
@@ -36,6 +42,9 @@ static void console_sd(const char *arg);
 static void console_rtc(const char *arg);
 static void console_sd_locked(const char *arg);
 static void console_stall(const char *arg);
+static void console_usb(const char *arg);
+static void console_dump(const char *arg);
+static void console_feed(char c, char *line, uint32_t *len);
 
 void app_console_init(void)
 {
@@ -124,35 +133,53 @@ void app_console_thread_entry(ULONG thread_input)
       char c = (char)rx_ring[rx_tail];
       __DMB();
       rx_tail = (rx_tail + 1U) & (APP_CON_RX_SIZE - 1U);
+      console_feed(c, line_buffer, &line_len);
+    }
 
-      if ((c == '\r') || (c == '\n'))
+    uint32_t got;
+    uint8_t usb_chunk[64];
+    while ((got = app_usb_read(usb_chunk, sizeof(usb_chunk))) > 0U)
+    {
+      for (uint32_t i = 0U; i < got; i++)
       {
-        if (line_len > 0U)
-        {
-          line_buffer[line_len] = '\0';
-          console_dispatch(line_buffer);
-          line_len = 0U;
-        }
-      }
-      else if ((c == '\b') || (c == 0x7F))
-      {
-        if (line_len > 0U)
-        {
-          line_len--;
-        }
-      }
-      else if (line_len < (APP_CON_LINE_SIZE - 1U))
-      {
-        line_buffer[line_len++] = c;
-      }
-      else
-      {
-        line_len = 0U;
-        app_log_printf("ERR line-too-long\r\n");
+        console_feed((char)usb_chunk[i], usb_line_buffer, &usb_line_len);
       }
     }
 
     tx_thread_sleep(1);
+  }
+}
+
+/*
+ * Both channels share one dispatcher: they run in this thread, so a command
+ * arriving on USB and one arriving on USART3 are still handled one at a time.
+ */
+static void console_feed(char c, char *line, uint32_t *len)
+{
+  if ((c == '\r') || (c == '\n'))
+  {
+    if (*len > 0U)
+    {
+      line[*len] = '\0';
+      console_dispatch(line);
+      *len = 0U;
+    }
+  }
+  else if ((c == '\b') || (c == 0x7F))
+  {
+    if (*len > 0U)
+    {
+      (*len)--;
+    }
+  }
+  else if (*len < (APP_CON_LINE_SIZE - 1U))
+  {
+    line[(*len)++] = c;
+  }
+  else
+  {
+    *len = 0U;
+    app_log_printf("ERR line-too-long\r\n");
   }
 }
 
@@ -177,7 +204,7 @@ void app_console_status(void)
 
 static void console_help(void)
 {
-  app_log_printf("HELP commands: status stack fault wdg log <text> fs <info|ls|format|mount|umount|write|append|read|rm|test|fill|stress> rtc <info|set YYYY-MM-DD HH:MM:SS> acq <info|hwcheck [ext]|target <sim|sd>|start [dma|irq] [hz]|stop|check|selftest|ch [1-4]|demux|level [0-19]|dac [0-4095]> sd <raw|fs> dma <env|test> stall <0|1|2> crash reboot\r\n");
+  app_log_printf("HELP commands: status stack fault wdg log <text> fs <info|ls|format|mount|umount|write|append|read|rm|test|fill|stress> rtc <info|set YYYY-MM-DD HH:MM:SS> acq <info|hwcheck [ext]|target <sim|sd>|start [dma|irq] [hz]|stop|check|selftest|ch [1-4]|demux|level [0-19]|dac [0-4095]> sd <raw|fs> dma <env|test> usb dump <name> stall <0|1|2> crash reboot\r\n");
 }
 
 static void console_fault_report(void)
@@ -1116,6 +1143,14 @@ static void console_dispatch(char *line)
   {
     console_dma(line + 3);
   }
+  else if (strncmp(line, "usb", 3) == 0)
+  {
+    console_usb(line + 3);
+  }
+  else if (strncmp(line, "dump ", 5) == 0)
+  {
+    console_dump(line + 5);
+  }
   else if (strncmp(line, "stall", 5) == 0)
   {
     console_stall(line + 5);
@@ -1137,4 +1172,81 @@ static void console_dispatch(char *line)
     app_log_printf("ERR unknown-cmd=%s len=%lu\r\n",
                    line, (unsigned long)strlen(line));
   }
+}
+
+static void console_usb(const char *arg)
+{
+  (void)arg;
+  app_usb_report();
+}
+
+/* Chunk callback for app_fxdisk_read_stream: 0 keeps the transfer going. */
+static int console_dump_chunk(const char *data, uint32_t len, void *ctx)
+{
+  (void)ctx;
+  return app_usb_send_blocking((const uint8_t *)data, len);
+}
+
+/*
+ * Push a file straight out of the CDC port, byte for byte, so the host can
+ * `cat` it. This avoids the mass-storage route entirely: the volume stays
+ * mounted by FileX and nothing has to be unmounted to get the data out.
+ *
+ * The media lock is held for the whole transfer, which is what keeps the
+ * acquisition writer from moving the file while it is being read.
+ */
+static void console_dump(const char *arg)
+{
+  char name[APP_CON_FS_NAME_MAX];
+  uint32_t total = 0U;
+  int rc;
+
+  while (*arg == ' ')
+  {
+    arg++;
+  }
+  if ((*arg == '\0') || (strlen(arg) >= sizeof(name)))
+  {
+    app_log_printf("ERR usage: dump <name>\r\n");
+    return;
+  }
+  if (app_usb_connected() == 0)
+  {
+    app_log_printf("ERR usb-not-connected\r\n");
+    return;
+  }
+  snprintf(name, sizeof(name), "%s", arg);
+
+  if (app_fxdisk_lock() != 0)
+  {
+    app_log_printf("ERR fs-busy\r\n");
+    return;
+  }
+
+  /* Let anything already queued reach the host before the payload starts, then
+     mute the async mirror so no log line can land in the middle of the file. */
+  (void)app_usb_flush(50U);
+  tx_thread_sleep(2);
+  app_usb_set_dump(1);
+
+  char marker[APP_CON_FS_NAME_MAX + 24];
+  snprintf(marker, sizeof(marker), "DUMP begin name=%s\r\n", name);
+  (void)app_usb_send_blocking((const uint8_t *)marker, (uint32_t)strlen(marker));
+
+  rc = app_fxdisk_read_stream(name, console_dump_chunk, NULL, &total);
+
+  app_usb_set_dump(0);
+  (void)app_fxdisk_unlock();
+
+  /* The closing line travels through the log ring, so it reaches the UART as
+     well as the CDC port once the mirror is back on. */
+  if (rc == 0)
+  {
+    app_log_printf("DUMP ok name=%s bytes=%lu\r\n", name, (unsigned long)total);
+  }
+  else
+  {
+    app_log_printf("DUMP failed name=%s rc=%d\r\n", name, rc);
+  }
+  (void)app_usb_flush(20U);
 }
