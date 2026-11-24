@@ -6,6 +6,7 @@
 #include "main.h"
 
 #include "ux_api.h"
+#include "ux_system.h"
 #include "ux_device_class_cdc_acm.h"
 #include "ux_dcd_stm32.h"
 #include "stm32h5xx_ll_ucpd.h"
@@ -14,6 +15,7 @@
 #include <string.h>
 
 PCD_HandleTypeDef hpcd_USB_DRD_FS;
+extern volatile uint32_t app_usb_irq_count;
 
 /* ------------------------------------------------------------------------- */
 /* Device framework                                                          */
@@ -581,6 +583,15 @@ void app_usb_cc_enable(void)
 
 void app_usb_report_regs(void)
 {
+  /* ISTR flags are cleared by the interrupt handler as it services them, so a
+     zero ISTR proves nothing about whether a reset happened. The USBX state
+     machine is the authoritative answer: 3 = default, 4 = addressed,
+     5 = configured. */
+  app_log_printf("USB DEV state=%lu dcd=%lu pcd=%lu irq=%lu\r\n",
+                 (unsigned long)_ux_system_slave->ux_system_slave_device.ux_slave_device_state,
+                 (unsigned long)_ux_system_slave->ux_system_slave_dcd.ux_slave_dcd_status,
+                 (unsigned long)hpcd_USB_DRD_FS.State,
+                 (unsigned long)app_usb_irq_count);
   app_log_printf("USB REG cntr=0x%08lx istr=0x%08lx fnr=0x%08lx bcdr=0x%08lx\r\n",
                  (unsigned long)USB_DRD_FS->CNTR,
                  (unsigned long)USB_DRD_FS->ISTR,
