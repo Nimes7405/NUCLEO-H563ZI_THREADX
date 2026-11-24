@@ -33,5 +33,9 @@ void app_usb_set_dump(int on);
 int app_usb_connected(void);
 int app_usb_ready(void);
 void app_usb_report(void);
+/* Raw controller and pad state; the only way to tell "no VBUS" from
+   "VBUS but the host never reset us" on this board. */
+void app_usb_report_regs(void);
+void app_usb_cc_enable(void);
 
 #endif

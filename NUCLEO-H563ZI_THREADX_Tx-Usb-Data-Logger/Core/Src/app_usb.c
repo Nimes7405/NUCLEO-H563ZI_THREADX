@@ -8,6 +8,7 @@
 #include "ux_api.h"
 #include "ux_device_class_cdc_acm.h"
 #include "ux_dcd_stm32.h"
+#include "stm32h5xx_ll_ucpd.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -224,10 +225,55 @@ static void usb_cdc_parameter_change(VOID *instance)
 }
 
 /* ------------------------------------------------------------------------- */
+/* Type-C front end                                                          */
+/* ------------------------------------------------------------------------- */
+/*
+ * The user connector is a Type-C receptacle behind a TCPP01 protector, and its
+ * CC1/CC2 lines go to UCPD1, not to fixed resistors. A host only applies VBUS
+ * once it sees a sink termination, so without this the port stays invisible:
+ * the device controller happily enables its pull-up and then never sees a bus
+ * reset (ISTR stays 0 forever).
+ *
+ * Rd is all that is needed for USB 2.0 at 5 V - no PD messaging, so the USBPD
+ * stack is not linked in.
+ */
+static void app_usb_ucpd_init(void)
+{
+  LL_UCPD_InitTypeDef settings;
+  GPIO_InitTypeDef gpio = {0};
+
+  __HAL_RCC_UCPD1_CLK_ENABLE();
+
+  /* The UCPD front end only owns the pins in analog mode. */
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+  gpio.Pin = GPIO_PIN_13 | GPIO_PIN_14;
+  gpio.Mode = GPIO_MODE_ANALOG;
+  gpio.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOB, &gpio);
+
+  LL_UCPD_StructInit(&settings);
+  (void)LL_UCPD_Init(UCPD1, &settings);
+
+  /* Order matters: the CC termination controls are only latched once the
+     peripheral is enabled. Writing the role first leaves CR at zero, which
+     reads back as "nothing attached" and looks exactly like an unplugged
+     cable. */
+  LL_UCPD_Enable(UCPD1);
+
+  /* Dead-battery mode would hand CC control to the protector chip instead. */
+  HAL_PWREx_DisableUCPDDeadBattery();
+
+  LL_UCPD_SetSNKRole(UCPD1);
+  LL_UCPD_SetccEnable(UCPD1, LL_UCPD_CCENABLE_CC1CC2);
+}
+
+/* ------------------------------------------------------------------------- */
 /* Stack start                                                               */
 /* ------------------------------------------------------------------------- */
 static int usb_stack_start(void)
 {
+  app_usb_ucpd_init();
+
   if (ux_system_initialize(usb_pool, sizeof(usb_pool), UX_NULL, 0U) != UX_SUCCESS)
   {
     return -1;
@@ -520,6 +566,44 @@ void app_usb_report(void)
                  (unsigned long)usb_tx_dropped);
 }
 
+/* Write the sink termination again and show the register before/after, so a
+   silently ignored CR write is visible instead of looking like "no cable". */
+void app_usb_cc_enable(void)
+{
+  app_log_printf("USB CC before cr=0x%08lx cfg1=0x%08lx\r\n",
+                 (unsigned long)UCPD1->CR, (unsigned long)UCPD1->CFG1);
+  LL_UCPD_Enable(UCPD1);
+  LL_UCPD_SetSNKRole(UCPD1);
+  LL_UCPD_SetccEnable(UCPD1, LL_UCPD_CCENABLE_CC1CC2);
+  app_log_printf("USB CC after cr=0x%08lx cfg1=0x%08lx\r\n",
+                 (unsigned long)UCPD1->CR, (unsigned long)UCPD1->CFG1);
+}
+
+void app_usb_report_regs(void)
+{
+  app_log_printf("USB REG cntr=0x%08lx istr=0x%08lx fnr=0x%08lx bcdr=0x%08lx\r\n",
+                 (unsigned long)USB_DRD_FS->CNTR,
+                 (unsigned long)USB_DRD_FS->ISTR,
+                 (unsigned long)USB_DRD_FS->FNR,
+                 (unsigned long)USB_DRD_FS->BCDR);
+  app_log_printf("USB PAD moder=0x%08lx idr=0x%08lx dppu=%lu dp=%lu dm=%lu\r\n",
+                 (unsigned long)GPIOA->MODER,
+                 (unsigned long)GPIOA->IDR,
+                 (unsigned long)((USB_DRD_FS->BCDR >> 15) & 1U),
+                 (unsigned long)((GPIOA->IDR >> 12) & 1U),
+                 (unsigned long)((GPIOA->IDR >> 11) & 1U));
+  app_log_printf("USB UCPD cfg1=0x%08lx cr=0x%08lx sr=0x%08lx\r\n",
+                 (unsigned long)UCPD1->CFG1,
+                 (unsigned long)UCPD1->CR,
+                 (unsigned long)UCPD1->SR);
+  /* VSTATE: 0 = below 0.2 V, 1 = 0.2-0.66 V (Rd), 2 = above 0.66 V (Rp, i.e.
+     a host is driving this CC line). A sink plugged into a live host port sees
+     2 on exactly one of the two lines. */
+  app_log_printf("USB CC cc1=%lu cc2=%lu (0=none 1=rd 2=source)\r\n",
+                 (unsigned long)((LL_UCPD_GetTypeCVstateCC1(UCPD1) >> UCPD_SR_TYPEC_VSTATE_CC1_Pos) & 3U),
+                 (unsigned long)((LL_UCPD_GetTypeCVstateCC2(UCPD1) >> UCPD_SR_TYPEC_VSTATE_CC2_Pos) & 3U));
+}
+
 void app_usb_system_init(void)
 {
   if (tx_event_flags_create(&usb_events, "usb-events") != TX_SUCCESS)
@@ -552,6 +636,19 @@ void HAL_PCD_MspInit(PCD_HandleTypeDef *hpcd)
   HAL_PWREx_EnableVddUSB();
 
   __HAL_RCC_USB_CLK_ENABLE();
+
+  /* PA9 is the TCPP01 dead-battery input. Driving it high disables the
+     protector's own termination so UCPD1 owns CC1/CC2 (see app_usb_ucpd_init);
+     leaving it low makes two Rd networks fight over the same lines. */
+  GPIO_InitTypeDef gpio = {0};
+
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_9, GPIO_PIN_SET);
+  gpio.Pin = GPIO_PIN_9;
+  gpio.Mode = GPIO_MODE_OUTPUT_PP;
+  gpio.Pull = GPIO_PULLUP;
+  gpio.Speed = GPIO_SPEED_FREQ_HIGH;
+  HAL_GPIO_Init(GPIOA, &gpio);
 
   /* PA11/PA12 are the dedicated USB_DRD_FS pads and are driven by the
      controller itself, which is why ST's working samples leave them at their

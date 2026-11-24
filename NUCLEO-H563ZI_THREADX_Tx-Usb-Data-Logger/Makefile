@@ -35,6 +35,9 @@ CFLAGS += -ffunction-sections -fdata-sections -MMD -MP
 CFLAGS += -DSTM32H563xx -DHSE_VALUE=8000000UL -DUSE_HAL_DRIVER
 CFLAGS += -DTX_INCLUDE_USER_DEFINE_FILE
 CFLAGS += -DUX_INCLUDE_USER_DEFINE_FILE
+# The UCPD front end is configured through its LL API (sink Rd), which
+# is only exposed when the full LL driver is requested.
+CFLAGS += -DUSE_FULL_LL_DRIVER
 CFLAGS += $(SECURITY_DEFINE)
 ASFLAGS = $(CFLAGS) -x assembler-with-cpp
 
@@ -75,6 +78,7 @@ HAL_SRCS = \
 	$(HAL_DIR)/Src/stm32h5xx_hal_pcd.c \
 	$(HAL_DIR)/Src/stm32h5xx_hal_pcd_ex.c \
 	$(HAL_DIR)/Src/stm32h5xx_ll_usb.c \
+	$(HAL_DIR)/Src/stm32h5xx_ll_ucpd.c \
 	$(HAL_DIR)/Src/stm32h5xx_hal_rcc.c \
 	$(HAL_DIR)/Src/stm32h5xx_hal_rtc.c \
 	$(HAL_DIR)/Src/stm32h5xx_hal_rtc_ex.c \

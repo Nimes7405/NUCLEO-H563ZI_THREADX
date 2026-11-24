@@ -204,7 +204,7 @@ void app_console_status(void)
 
 static void console_help(void)
 {
-  app_log_printf("HELP commands: status stack fault wdg log <text> fs <info|ls|format|mount|umount|write|append|read|rm|test|fill|stress> rtc <info|set YYYY-MM-DD HH:MM:SS> acq <info|hwcheck [ext]|target <sim|sd>|start [dma|irq] [hz]|stop|check|selftest|ch [1-4]|demux|level [0-19]|dac [0-4095]> sd <raw|fs> dma <env|test> usb dump <name> stall <0|1|2> crash reboot\r\n");
+  app_log_printf("HELP commands: status stack fault wdg log <text> fs <info|ls|format|mount|umount|write|append|read|rm|test|fill|stress> rtc <info|set YYYY-MM-DD HH:MM:SS> acq <info|hwcheck [ext]|target <sim|sd>|start [dma|irq] [hz]|stop|check|selftest|ch [1-4]|demux|level [0-19]|dac [0-4095]> sd <raw|fs> dma <env|test> usb [regs|cc] dump <name> stall <0|1|2> crash reboot\r\n");
 }
 
 static void console_fault_report(void)
@@ -1176,7 +1176,21 @@ static void console_dispatch(char *line)
 
 static void console_usb(const char *arg)
 {
-  (void)arg;
+  while (*arg == ' ')
+  {
+    arg++;
+  }
+  if (strncmp(arg, "regs", 4) == 0)
+  {
+    app_usb_report_regs();
+    return;
+  }
+  if (strncmp(arg, "cc", 2) == 0)
+  {
+    app_usb_cc_enable();
+    app_usb_report_regs();
+    return;
+  }
   app_usb_report();
 }
 
