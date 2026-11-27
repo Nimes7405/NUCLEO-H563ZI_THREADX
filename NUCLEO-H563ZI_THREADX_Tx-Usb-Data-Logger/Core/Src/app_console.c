@@ -794,7 +794,8 @@ static void console_sd_locked(const char *arg)
     {
       int rc = app_sdspi_init();
 
-      app_log_printf("SD init rc=%d\r\n", rc);
+      app_log_printf("SD init rc=%d step=%lu\r\n", rc,
+                     (unsigned long)app_sdspi_init_step());
       if (rc != 0)
       {
         app_sdspi_info();
@@ -850,7 +851,8 @@ static void console_sd_locked(const char *arg)
     (void)app_fxsd_unmount();
     rc = app_sdspi_init();
 
-    app_log_printf("SD init rc=%d\r\n", rc);
+    app_log_printf("SD init rc=%d step=%lu\r\n", rc,
+                   (unsigned long)app_sdspi_init_step());
     if (rc == 0)
     {
       app_sdspi_info();
@@ -1423,7 +1425,7 @@ static void console_soak(const char *arg)
       default:  duration_s = (uint32_t)value * 3600U; break;
     }
 
-    int rc = app_soak_start(duration_s, (uint32_t)hz, (uint32_t)ch);
+    int rc = app_soak_start(duration_s, (uint32_t)hz, (uint32_t)ch, 0U);
     app_log_printf("SOAK start=%s rc=%d duration_s=%lu\r\n",
                    (rc == 0) ? "ok" : "fail", rc,
                    (unsigned long)duration_s);

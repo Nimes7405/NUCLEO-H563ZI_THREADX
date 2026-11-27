@@ -32,7 +32,12 @@ void app_soak_service(void);
    exercise the same path as an eight hour one. Sets channels and the rotation
    budget, arms the ledger, writes the header and starts the capture. */
 #define APP_SOAK_MIN_SECONDS    30U
-int app_soak_start(uint32_t duration_s, uint32_t hz, uint32_t channels);
+/* resume_index is the file ring position to continue from: 0 for a fresh run,
+   or the value SOAK.ARM carried for a run that was interrupted. It is a
+   parameter rather than hidden state because both the console and the boot
+   path call this, and a stale default silently truncated a file twice. */
+int app_soak_start(uint32_t duration_s, uint32_t hz, uint32_t channels,
+                   uint32_t resume_index);
 /* Called once at boot from the console thread, after the file systems are up.
    If SOAK.ARM is on the card the run continues with the remaining time, which
    is what makes swapping the power source safe: a power cycle clears the

@@ -48,6 +48,10 @@ static volatile uint32_t sd_err_op;      /* which step failed last */
 static volatile uint32_t sd_err_code;    /* R1 or token seen */
 static volatile uint32_t sd_err_lba;
 static uint32_t csd_token_seen;
+/* Step that failed during the last init attempt. A bare rc=-1 says nothing
+   about which command the card refused, and that is the whole question when a
+   card answers but never leaves idle. */
+static uint32_t sd_init_step;
 
 static void sd_cs(int level)
 {
@@ -234,6 +238,7 @@ static int sd_card_init_sequence(void)
   uint8_t r1;
   uint32_t start;
 
+  sd_init_step = 0U;
   sd_block_addressed = 0U;
   sd_sdhc = 0U;
   sd_hc_capable = 0U;
@@ -248,6 +253,7 @@ static int sd_card_init_sequence(void)
   (void)sd_xfer(0xFFU);
   if (r1 != SD_R1_IDLE)
   {
+    sd_init_step = 1U;   /* CMD0 */
     return -1;
   }
 
@@ -259,12 +265,14 @@ static int sd_card_init_sequence(void)
   {
     if ((body[2] != 0x01U) || (body[3] != 0xAAU))
     {
+      sd_init_step = 2U;   /* CMD8 echo mismatch */
       return -2;
     }
     sd_hc_capable = 1U;
   }
   else if ((r1 & SD_R1_ILLEGAL) == 0U)
   {
+    sd_init_step = 3U;   /* CMD8 unexpected */
     return -3;
   }
 
@@ -283,6 +291,7 @@ static int sd_card_init_sequence(void)
       (void)sd_xfer(0xFFU);
       if ((r & SD_R1_ILLEGAL) != 0U)
       {
+        sd_init_step = 4U;   /* CMD55 refused */
         return -4;
       }
       continue;
@@ -297,6 +306,7 @@ static int sd_card_init_sequence(void)
     }
     if (r > SD_R1_IDLE)
     {
+      sd_init_step = 5U;   /* ACMD41 error */
       return -5;
     }
     HAL_Delay(1U);
@@ -304,6 +314,7 @@ static int sd_card_init_sequence(void)
 
   if (HAL_GetTick() - start >= 2000U)
   {
+    sd_init_step = 6U;   /* ACMD41 never left idle */
     return -6;
   }
 
@@ -313,6 +324,7 @@ static int sd_card_init_sequence(void)
   (void)sd_xfer(0xFFU);
   if (r1 != 0U)
   {
+    sd_init_step = 7U;   /* CMD58 failed */
     return -7;
   }
   {
@@ -331,6 +343,7 @@ static int sd_card_init_sequence(void)
   (void)sd_xfer(0xFFU);
   if (r1 != 0U)
   {
+    sd_init_step = 8U;   /* CMD16 failed */
     return -8;
   }
 
@@ -382,6 +395,7 @@ static int sd_card_init_sequence(void)
   sd_cs(1);
   (void)sd_xfer(0xFFU);
 
+  sd_init_step = 0U;
   return 0;
 }
 
@@ -489,6 +503,11 @@ void app_sdspi_probe(void)
 
 /* Raw levels of the four signals: IDR reflects the pad even when the pin is in
    alternate-function mode, so this needs no reconfiguration. */
+uint32_t app_sdspi_init_step(void)
+{
+  return sd_init_step;
+}
+
 void app_sdspi_pins(void)
 {
   uint32_t cs = ((SD_CS_PORT->IDR & SD_CS_PIN) != 0U) ? 1U : 0U;

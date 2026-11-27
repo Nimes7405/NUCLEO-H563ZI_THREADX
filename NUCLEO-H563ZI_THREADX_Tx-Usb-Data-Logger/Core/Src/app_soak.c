@@ -425,7 +425,8 @@ void app_soak_boot_resume(void)
     return;
   }
 
-  if (app_soak_start(remaining, (uint32_t)hz, (uint32_t)channels) != 0)
+  if (app_soak_start(remaining, (uint32_t)hz, (uint32_t)channels,
+                     (uint32_t)next_file) != 0)
   {
     return;
   }
@@ -439,8 +440,6 @@ void app_soak_boot_resume(void)
    *   - the arm file was rewritten with the remaining duration, so a second
    *     power cycle would shorten the run again
    */
-  (void)app_acq_resume_index((uint32_t)next_file);
-
   soak_elapsed_s = recovered;
   soak_target_s = (uint32_t)total_s;
   soak_start_tick -= recovered * APP_TICK_HZ;
@@ -452,7 +451,8 @@ void app_soak_boot_resume(void)
                  (uint32_t)next_file, recovered);
 }
 
-int app_soak_start(uint32_t duration_s, uint32_t hz, uint32_t channels)
+int app_soak_start(uint32_t duration_s, uint32_t hz, uint32_t channels,
+                   uint32_t resume_index)
 {
   char header[192];
   int rc;
@@ -525,7 +525,14 @@ int app_soak_start(uint32_t duration_s, uint32_t hz, uint32_t channels)
            app_boot_reset_name(),
            (unsigned long)soak_boots);
   soak_write(header);
-  soak_arm_write(duration_s, hz, channels, 0U, 0U);
+  soak_arm_write(duration_s, hz, channels, resume_index, 0U);
+
+  /* set_files() above reset the index; restore the resume point here, while
+     nothing has been opened yet. app_acq_start() consumes it. */
+  if (resume_index != 0U)
+  {
+    (void)app_acq_resume_index(resume_index);
+  }
 
   rc = app_acq_start(1, hz);
   if (rc != 0)

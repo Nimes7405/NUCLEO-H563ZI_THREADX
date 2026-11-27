@@ -174,6 +174,10 @@ static uint32_t acq_file_max_bytes = APP_ACQ_FILE_MAX_BYTES;
    requested explicitly survives an `acq target` switch. */
 static uint32_t acq_file_keep = APP_ACQ_FILE_KEEP;
 static uint32_t acq_file_max_override;
+/* Consumed by app_acq_start(), which owns the actual open: the index has to be
+   in place before that call, and everything start() does before opening - the
+   rotation reset in set_files() and its own counter clear - would undo it. */
+static uint32_t acq_resume_pending;
 
 static TX_QUEUE acq_queue;
 static ULONG acq_queue_mem[ACQ_QUEUE_DEPTH * (sizeof(acq_record_t) / sizeof(ULONG))];
@@ -606,7 +610,8 @@ int app_acq_start(int use_dma, uint32_t hz)
   acq_ring_drops = 0U;
   acq_windows_done = 0U;
   acq_samples_done = 0U;
-  acq_file_index = 0U;
+  acq_file_index = acq_resume_pending;
+  acq_resume_pending = 0U;
   acq_files_created = 0U;
   acq_min = 0xFFFFFFFFU;
   acq_max = 0U;
@@ -1809,6 +1814,7 @@ int app_acq_resume_index(uint32_t index)
   {
     return -1;
   }
+  acq_resume_pending = index;
   acq_file_index = index;
   acq_files_created = 0U;
   return 0;

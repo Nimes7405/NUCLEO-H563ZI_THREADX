@@ -25,6 +25,10 @@ void app_sdspi_info(void);
 void app_sdspi_probe(void);
 void app_sdspi_pins(void);
 void app_sdspi_miso(void);
+/* Step of the last init attempt that failed: 0 none, 1 CMD0, 2 CMD8 echo,
+   3 CMD8 unexpected, 4 CMD55, 5 ACMD41 error, 6 ACMD41 never left idle,
+   7 CMD58, 8 CMD16. */
+uint32_t app_sdspi_init_step(void);
 void app_sdspi_echo(void);
 void app_sdspi_jump(void);
 void app_sdspi_read_probe(uint32_t lba);
