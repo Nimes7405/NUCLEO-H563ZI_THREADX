@@ -340,6 +340,15 @@ int app_fxdisk_lock(void)
   return (tx_mutex_get(&media_mutex, TX_WAIT_FOREVER) == TX_SUCCESS) ? 0 : -1;
 }
 
+int app_fxdisk_lock_timeout(uint32_t ticks)
+{
+  if (media_mutex_ready == 0U)
+  {
+    return -1;
+  }
+  return (tx_mutex_get(&media_mutex, (ULONG)ticks) == TX_SUCCESS) ? 0 : -1;
+}
+
 int app_fxdisk_unlock(void)
 {
   if (media_mutex_ready == 0U)

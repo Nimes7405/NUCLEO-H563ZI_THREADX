@@ -129,6 +129,7 @@ typedef struct
   const char *name;
   int (*ready)(void);
   int (*lock)(void);
+  int (*lock_timeout)(uint32_t ticks);
   int (*unlock)(void);
   int (*log_open)(const char *name);
   int (*log_write)(const void *data, uint32_t len);
@@ -142,6 +143,7 @@ static const acq_media_ops_t acq_media_sim = {
     "sim",
     app_fxdisk_ready,
     app_fxdisk_lock,
+    app_fxdisk_lock_timeout,
     app_fxdisk_unlock,
     app_fxdisk_log_open,
     app_fxdisk_log_write,
@@ -155,6 +157,7 @@ static const acq_media_ops_t acq_media_sd = {
     "sd",
     app_fxsd_mounted_ready,
     app_fxsd_lock,
+    app_fxsd_lock_timeout,
     app_fxsd_unlock,
     app_fxsd_log_open,
     app_fxsd_log_write,
@@ -932,6 +935,32 @@ static void acq_drain_and_close(void)
 }
 
 /* Writer thread: drains the queue in batches and flushes once per batch. */
+/*
+ * Taking the media lock can take seconds: a self-check or a dump holds it while
+ * reading a whole file. TX_WAIT_FOREVER would leave the writer unable to mark
+ * its heartbeat, and the watchdog would report a stall for a thread that is
+ * only waiting on a live owner.
+ *
+ * So wait in slices, marking progress while the lock is held elsewhere - but
+ * stop after a bound, so a real deadlock still reaches the watchdog instead of
+ * being masked forever.
+ */
+#define ACQ_LOCK_SLICE_TICKS    (APP_TICK_HZ / 5U)   /* 200 ms */
+#define ACQ_LOCK_SLICES         100U                 /* 20 s */
+
+static int acq_writer_lock(void)
+{
+  for (uint32_t slice = 0U; slice < ACQ_LOCK_SLICES; slice++)
+  {
+    if (acq_media->lock_timeout(ACQ_LOCK_SLICE_TICKS) == 0)
+    {
+      return 0;
+    }
+    app_hb_mark(APP_HB_WRITER);
+  }
+  return -1;
+}
+
 void app_acq_writer_entry(unsigned long thread_input)
 {
   (void)thread_input;
@@ -955,7 +984,7 @@ void app_acq_writer_entry(unsigned long thread_input)
       continue;
     }
 
-    locked = (acq_media->lock() == 0);
+    locked = (acq_writer_lock() == 0);
 
     if (locked)
     {

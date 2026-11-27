@@ -39,6 +39,11 @@ int app_fxsd_lock(void)
   return (tx_mutex_get(&sd_mutex, TX_WAIT_FOREVER) == TX_SUCCESS) ? 0 : -1;
 }
 
+int app_fxsd_lock_timeout(uint32_t ticks)
+{
+  return (tx_mutex_get(&sd_mutex, (ULONG)ticks) == TX_SUCCESS) ? 0 : -1;
+}
+
 int app_fxsd_unlock(void)
 {
   return (tx_mutex_put(&sd_mutex) == TX_SUCCESS) ? 0 : -1;

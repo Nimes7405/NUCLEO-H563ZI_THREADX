@@ -16,6 +16,9 @@ void app_fxsd_system_init(void);
 void app_fxsd_init(void);
 
 int app_fxsd_lock(void);
+/* Bounded wait, so a caller that must keep marking a heartbeat can do so while
+   another thread holds the media for a long self-check or dump. */
+int app_fxsd_lock_timeout(uint32_t ticks);
 int app_fxsd_unlock(void);
 
 int app_fxsd_is_mounted(void);

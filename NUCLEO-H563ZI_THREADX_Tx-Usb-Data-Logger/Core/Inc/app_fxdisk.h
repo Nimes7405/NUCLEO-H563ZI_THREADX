@@ -13,6 +13,7 @@ void app_fxdisk_system_init(void);
 /* Serialises FileX media access between concurrent threads. Not recursive:
    never call a locked API while already holding the lock. */
 int app_fxdisk_lock(void);
+int app_fxdisk_lock_timeout(uint32_t ticks);
 int app_fxdisk_unlock(void);
 void app_fxdisk_init(void);
 int app_fxdisk_ready(void);
