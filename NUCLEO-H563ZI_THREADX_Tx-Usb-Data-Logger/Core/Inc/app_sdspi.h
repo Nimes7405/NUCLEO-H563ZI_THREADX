@@ -24,6 +24,7 @@ void app_sdspi_info(void);
 /* Dump the raw bytes of one CMD0 exchange (bus-level diagnosis). */
 void app_sdspi_probe(void);
 void app_sdspi_pins(void);
+void app_sdspi_miso(void);
 void app_sdspi_echo(void);
 void app_sdspi_jump(void);
 void app_sdspi_read_probe(uint32_t lba);

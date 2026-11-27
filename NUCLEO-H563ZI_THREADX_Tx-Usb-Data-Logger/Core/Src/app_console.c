@@ -811,6 +811,13 @@ static void console_sd_locked(const char *arg)
     return;
   }
 
+  if (strcmp(arg, "miso") == 0)
+  {
+    app_sdspi_miso();
+    app_sdspi_pins();
+    return;
+  }
+
   if (strcmp(arg, "jump") == 0)
   {
     app_sdspi_jump();
@@ -1080,7 +1087,7 @@ static void console_sd_locked(const char *arg)
     return;
   }
 
-  app_log_printf("ERR usage: sd <info|pins|jump|echo|probe|rdprobe <lba>|init|read <lba>|wtest <lba>|mount|umount|format [sectors]|ls|put <name> <text>|cat <name>|rm <name>>\r\n");
+  app_log_printf("ERR usage: sd <info|pins|miso|jump|echo|probe|rdprobe <lba>|init|read <lba>|wtest <lba>|mount|umount|format [sectors]|ls|put <name> <text>|cat <name>|rm <name>>\r\n");
 }
 
 /* Calendar clock used for the log timestamps. */

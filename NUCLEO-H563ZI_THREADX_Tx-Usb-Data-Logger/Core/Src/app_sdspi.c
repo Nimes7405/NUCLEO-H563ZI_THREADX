@@ -528,6 +528,51 @@ void app_sdspi_echo(void)
                   (rx[2] == pattern[2]) && (rx[3] == pattern[3])) ? "PASS" : "FAIL");
 }
 
+/*
+ * Read MISO (PG9) as a plain input under all three pull settings.
+ *
+ * With nothing attached the pad follows the pull (1 / 0 / last), which means
+ * the wire or the module is not connected. A pad that stays 0 whatever the
+ * pull is being driven low by something on the other side.
+ */
+void app_sdspi_miso(void)
+{
+  GPIO_InitTypeDef gpio = {0};
+  uint32_t none;
+  uint32_t up;
+  uint32_t down;
+
+  if (hspi1_sd.Instance != NULL)
+  {
+    (void)HAL_SPI_DeInit(&hspi1_sd);
+  }
+
+  gpio.Pin = GPIO_PIN_9;
+  gpio.Mode = GPIO_MODE_INPUT;
+  gpio.Speed = GPIO_SPEED_FREQ_LOW;
+
+  gpio.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOG, &gpio);
+  HAL_Delay(2U);
+  none = ((GPIOG->IDR & GPIO_PIN_9) != 0U) ? 1U : 0U;
+
+  gpio.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOG, &gpio);
+  HAL_Delay(2U);
+  up = ((GPIOG->IDR & GPIO_PIN_9) != 0U) ? 1U : 0U;
+
+  gpio.Pull = GPIO_PULLDOWN;
+  HAL_GPIO_Init(GPIOG, &gpio);
+  HAL_Delay(2U);
+  down = ((GPIOG->IDR & GPIO_PIN_9) != 0U) ? 1U : 0U;
+
+  app_log_printf("SD MISO pg9 none=%lu up=%lu down=%lu %s\r\n",
+                 (unsigned long)none, (unsigned long)up, (unsigned long)down,
+                 ((up == 1U) && (down == 0U)) ? "floating(no-wire?)" : "driven");
+
+  (void)sd_reconfigure(RCC_SPI1CLKSOURCE_CLKP, SD_SPI_PRESC_INIT);
+}
+
 /* Pure GPIO check: drive MOSI (PB5) as a plain output and read it back on
    MISO (PG9). This bypasses the SPI peripheral, so a high/low pair here proves
    the jumper really links D11 and D12. */
