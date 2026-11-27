@@ -78,6 +78,8 @@ void app_acq_level_report(uint32_t adc_channel_number, int have_channel);
 /* Diagnostic: DAC1_OUT1 (PA4) -> ADC1_INP18 loopback on the same pad. */
 int app_acq_dac_loopback(uint32_t code, uint32_t *raw);
 int app_acq_check(void);
+/* Verify a named file on the current medium (NULL = the one being written). */
+int app_acq_check_file(const char *name);
 /* Select where window records are logged. Refused while capturing.
    APP_ACQ_TARGET_SD mounts the card first and returns its mount status. */
 int app_acq_set_target(int target);

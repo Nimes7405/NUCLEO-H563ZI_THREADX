@@ -1337,7 +1337,10 @@ static int acq_parse_chunk(const char *data, uint32_t len, void *arg)
   return 0;
 }
 
-int app_acq_check(void)
+/* name == NULL checks the file currently being written; a name checks any file
+   on the medium, which is what verifying a finished run needs - after a reboot
+   nothing is "current" any more. */
+int app_acq_check_file(const char *name)
 {
   acq_parse_t ctx;
   uint32_t total = 0U;
@@ -1351,7 +1354,9 @@ int app_acq_check(void)
     return -9;
   }
 
-  if (acq_current[0] == '\0')
+  const char *target = (name != NULL) ? name : acq_current;
+
+  if (target[0] == '\0')
   {
     app_log_printf("ACQ CHECK FAIL reason=no-file\r\n");
     (void)acq_media->unlock();
@@ -1362,7 +1367,7 @@ int app_acq_check(void)
      the media cache. */
   (void)acq_media->log_flush();
 
-  rc = acq_media->read_stream(acq_current, (acq_chunk_fn)acq_parse_chunk, &ctx, &total);
+  rc = acq_media->read_stream(target, (acq_chunk_fn)acq_parse_chunk, &ctx, &total);
   if ((ctx.used > 0U) && (rc == 0))
   {
     acq_feed_line(&ctx);
@@ -1371,7 +1376,7 @@ int app_acq_check(void)
   if ((rc != 0) || (ctx.failed != 0) || (ctx.lines == 0U))
   {
     app_log_printf("ACQ CHECK FAIL file=%s rc=%d line=%lu lines=%lu bytes=%lu\r\n",
-                   acq_current, rc, (unsigned long)ctx.bad_line,
+                   target, rc, (unsigned long)ctx.bad_line,
                    (unsigned long)ctx.lines, (unsigned long)total);
     result = -2;
   }
@@ -1383,7 +1388,7 @@ int app_acq_check(void)
     app_rtc_format_epoch(ctx.first_epoch, first, sizeof(first));
     app_rtc_format_epoch(ctx.last_epoch, last, sizeof(last));
     app_log_printf("ACQ CHECK PASS file=%s lines=%lu channels=%lu samples=%lu bytes=%lu\r\n",
-                   acq_current, (unsigned long)ctx.lines, (unsigned long)ctx.channels,
+                   target, (unsigned long)ctx.lines, (unsigned long)ctx.channels,
                    (unsigned long)ctx.samples, (unsigned long)total);
     app_log_printf("ACQ CHECK time hdr=%lu first=%s last=%s span_s=%lu bad_ts=%lu\r\n",
                    (unsigned long)ctx.header_seen, first, last,
@@ -1394,6 +1399,11 @@ int app_acq_check(void)
 
   (void)acq_media->unlock();
   return result;
+}
+
+int app_acq_check(void)
+{
+  return app_acq_check_file(NULL);
 }
 
 

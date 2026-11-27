@@ -546,6 +546,7 @@ ADC 序列扫描（TIM3 每触发一次扫完 N 路）
 | 线程栈 | `sampler=400/2048`、`writer=1544/3072`、`console=1444/4096`、`monitor=1008/2048` |
 | 一键自检 | `./scripts/selfcheck.sh all`：`basic` 10、`fs` 19、`acq` 42、`mch` 36、`dma` 20、`rtc` 19、`usb` 9（需接线）、`watchdog` 4、`fault` 5 |
 | USB 栈 | `USB ready=1 connected=0`：USBX 初始化成功，未插线时按未连接处理，不影响其余八组 |
+| **8 小时长跑** | 4 通道 10 kHz：**571,202 个窗口 / 1,142,404,000 样本 / 38.8 MB**，11 个文件全部 `acq check PASS`、`bad_ts=0`，全程 `drop=0 dma_ovr=0 qdrop=0`，时间戳跨文件严格衔接 |
 
 ## 长跑（soak）
 
@@ -606,6 +607,30 @@ fs read SOAK.LOG           # 看计数器与栈水位趋势
 `PROD_A/PROD_B` 的周期性输出（`app_soak_quiet()`），`soak stop` 后恢复。
 
 > 注意：soak 运行期间不要跑 `selfcheck`，它依赖 `STATUS` 输出。
+
+### 实测：8 小时 4 通道 10 kHz 全通过
+
+```
+571,202 个窗口 = 1,142,404,000 个样本 = 38.8 MB，共 11 个文件
+每个文件 samples == lines x 500 x 4，bad_ts = 0
+log_drop = 0   drop = 0   dma_ovr = 0   qdrop = 0
+栈水位：monitor 1008（8 小时不变）、console 2444 -> 2476、writer 1776
+```
+
+**时间戳跨文件严格衔接**（每个文件的 `last` 等于下一个的 `first`），这是轮转
+无丢样的直接证据。`idx` 在续跑时会重零，所以跨段连续性要看 `epoch` 而不是 `idx`。
+
+### 跑完之后怎么验
+
+```sh
+acq check LOG0000.CSV      # 指定文件名。跑完后没有"当前文件"了
+acq check LOG0010.CSV
+sd cat SOAK.LOG 80300      # 带偏移，越过 511 字节的输出上限
+```
+
+`SOAK.LOG` 每 5 分钟→现在每 1 分钟一条记录，含 `elapsed_s / windows / drop /
+dma_ovr / qdrop / log_drop / 三个线程栈水位`。看它就能回答三个问题：跑到哪了、
+有没有丢样、有没有缓慢泄漏。
 
 ## 串口命令
 

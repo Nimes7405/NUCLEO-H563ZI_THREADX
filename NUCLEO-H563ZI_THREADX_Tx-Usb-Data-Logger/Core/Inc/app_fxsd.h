@@ -38,6 +38,10 @@ int app_fxsd_write_file(const char *name, const char *text, int append);
    anyway. */
 int app_fxsd_append_lazy(const char *name, const char *text);
 int app_fxsd_read_file(const char *name, char *out, uint32_t max, uint32_t *out_len);
+/* Read a window starting at `offset`; used by the console to page through a
+   log longer than its output buffer. */
+int app_fxsd_read_at(const char *name, uint32_t offset, char *out, uint32_t max,
+                     uint32_t *out_len);
 int app_fxsd_delete(const char *name);
 
 /* Sequential log interface, same shape as app_fxdisk's, so the acquisition

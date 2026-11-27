@@ -405,6 +405,45 @@ int app_fxsd_write_file(const char *name, const char *text, int append)
   return (status == FX_SUCCESS) ? 0 : (int)status;
 }
 
+/* Offset variant: reading a long file from the console needs windows, and a
+   500 byte cap makes an 80 KB log useless for a trend. */
+int app_fxsd_read_at(const char *name, uint32_t offset, char *out, uint32_t max,
+                     uint32_t *out_len)
+{
+  FX_FILE file;
+  UINT status;
+  ULONG got = 0UL;
+
+  if ((sd_mounted == 0U) || (name == NULL) || (out == NULL) || (max == 0U))
+  {
+    return -1;
+  }
+
+  status = fx_file_open(&sd_media, &file, (CHAR *)name, FX_OPEN_FOR_READ);
+  if (status != FX_SUCCESS)
+  {
+    return (int)status;
+  }
+
+  status = fx_file_seek(&file, (ULONG)offset);
+  if (status == FX_SUCCESS)
+  {
+    status = fx_file_read(&file, out, (ULONG)(max - 1U), &got);
+  }
+  (void)fx_file_close(&file);
+  if (status != FX_SUCCESS)
+  {
+    return (int)status;
+  }
+
+  out[got] = '\0';
+  if (out_len != NULL)
+  {
+    *out_len = (uint32_t)got;
+  }
+  return 0;
+}
+
 int app_fxsd_read_file(const char *name, char *out, uint32_t max, uint32_t *out_len)
 {
   FX_FILE file;

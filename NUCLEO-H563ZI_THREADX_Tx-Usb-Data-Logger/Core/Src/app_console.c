@@ -212,7 +212,7 @@ void app_console_status(void)
 
 static void console_help(void)
 {
-  app_log_printf("HELP commands: status stack fault wdg log <text> fs <info|ls|format|mount|umount|write|append|read|rm|test|fill|stress> rtc <info|set YYYY-MM-DD HH:MM:SS> acq <info|hwcheck [ext]|target <sim|sd>|start [dma|irq] [hz]|stop|check|selftest|ch [1-4]|demux|files [bytes keep]|level [0-19]|dac [0-4095]> sd <raw|fs> dma <env|test> usb [regs|cc] dump <name> soak <start <8h|5m|90s> [hz] [ch]|stop|report> stall <0|1|2> crash reboot\r\n");
+  app_log_printf("HELP commands: status stack fault wdg log <text> fs <info|ls|format|mount|umount|write|append|read|rm|test|fill|stress> rtc <info|set YYYY-MM-DD HH:MM:SS> acq <info|hwcheck [ext]|target <sim|sd>|start [dma|irq] [hz]|stop|check [file]|selftest|ch [1-4]|demux|files [bytes keep]|level [0-19]|dac [0-4095]> sd <raw|fs> dma <env|test> usb [regs|cc] dump <name> soak <start <8h|5m|90s> [hz] [ch]|stop|report> stall <0|1|2> crash reboot\r\n");
 }
 
 static void console_fault_report(void)
@@ -455,9 +455,15 @@ static void console_acq(const char *arg)
     return;
   }
 
-  if (strcmp(arg, "check") == 0)
+  if (strncmp(arg, "check", 5) == 0)
   {
-    (void)app_acq_check();
+    const char *name = arg + 5;
+
+    while (*name == ' ')
+    {
+      name++;
+    }
+    (void)app_acq_check_file((*name != '\0') ? name : NULL);
     return;
   }
 
@@ -1045,6 +1051,8 @@ static void console_sd_locked(const char *arg)
   {
     static char data[APP_CON_FS_DATA_MAX];
     const char *cursor = arg + 4;
+    char name[APP_CON_FS_NAME_MAX];
+    uint32_t offset = 0U;
     uint32_t got = 0U;
     int rc;
 
@@ -1052,12 +1060,32 @@ static void console_sd_locked(const char *arg)
     {
       cursor++;
     }
+    /* Optional offset, so a log longer than the output buffer can be paged
+       through from the console instead of only its first 500 bytes. */
+    const char *space = strchr(cursor, ' ');
+    if (space != NULL)
+    {
+      uint32_t len = (uint32_t)(space - cursor);
+
+      if ((len == 0U) || (len >= sizeof(name)))
+      {
+        app_log_printf("ERR usage: sd cat <name> [offset]\r\n");
+        return;
+      }
+      memcpy(name, cursor, len);
+      name[len] = '\0';
+      offset = (uint32_t)strtoul(space + 1, NULL, 10);
+      cursor = name;
+    }
+
     (void)app_fxsd_lock();
-    rc = app_fxsd_read_file(cursor, data, sizeof(data), &got);
+    rc = (offset == 0U)
+             ? app_fxsd_read_file(cursor, data, sizeof(data), &got)
+             : app_fxsd_read_at(cursor, offset, data, sizeof(data), &got);
     if (rc == 0)
     {
-      app_log_printf("SD DATA name=%s bytes=%lu text=%s\r\n", cursor,
-                     (unsigned long)got, data);
+      app_log_printf("SD DATA name=%s off=%lu bytes=%lu text=%s\r\n", cursor,
+                     (unsigned long)offset, (unsigned long)got, data);
     }
     else
     {
@@ -1089,7 +1117,7 @@ static void console_sd_locked(const char *arg)
     return;
   }
 
-  app_log_printf("ERR usage: sd <info|pins|miso|jump|echo|probe|rdprobe <lba>|init|read <lba>|wtest <lba>|mount|umount|format [sectors]|ls|put <name> <text>|cat <name>|rm <name>>\r\n");
+  app_log_printf("ERR usage: sd <info|pins|miso|jump|echo|probe|rdprobe <lba>|init|read <lba>|wtest <lba>|mount|umount|format [sectors]|ls|put <name> <text>|cat <name> [offset]|rm <name>>\r\n");
 }
 
 /* Calendar clock used for the log timestamps. */
