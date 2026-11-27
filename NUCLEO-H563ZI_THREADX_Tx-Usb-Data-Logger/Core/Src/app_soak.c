@@ -350,20 +350,31 @@ void app_soak_boot_resume(void)
   uint32_t remaining;
   uint32_t recovered;
 
+  /*
+   * This runs in the console thread, which cannot mark its own heartbeat while
+   * blocked here. Mounting a failing card costs several timeout periods, and
+   * the watchdog stops feeding IWDG after 1.5 s - without these marks a dead
+   * card turned boot into an IWDG reset loop, which is how this was found.
+   */
+  app_hb_mark(APP_HB_CONSOLE);
+
   /* The acquisition target is not remembered across a power cycle, so a run
      that was pointed at the card has to re-mount it to find its own arm file. */
   if (app_fxsd_is_mounted() == 0)
   {
     if (app_acq_set_target(APP_ACQ_TARGET_SD) != 0)
     {
+      /* Leave SOAK.ARM alone: the next boot with a working card resumes. */
       return;
     }
+    app_hb_mark(APP_HB_CONSOLE);
   }
 
   if (app_fxsd_read_file("SOAK.ARM", text, sizeof(text) - 1U, &len) != 0)
   {
     return;
   }
+  app_hb_mark(APP_HB_CONSOLE);
   text[len] = '\0';
 
   /* strtoul rather than sscanf: the scanf family drags in enough newlib to
