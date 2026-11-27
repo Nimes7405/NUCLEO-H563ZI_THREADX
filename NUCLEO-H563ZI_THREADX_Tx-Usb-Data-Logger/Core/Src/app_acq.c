@@ -1798,6 +1798,11 @@ int app_acq_set_files(uint32_t max_bytes, uint32_t keep)
   return 0;
 }
 
+uint32_t app_acq_file_index(void)
+{
+  return acq_file_index;
+}
+
 int app_acq_resume_index(uint32_t index)
 {
   if (acq_running != 0U)

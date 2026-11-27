@@ -35,6 +35,9 @@ uint32_t app_acq_file_keep(void);
    reset the next file must not overwrite evidence the previous boot wrote.
    Refused while capturing. */
 int app_acq_resume_index(uint32_t index);
+/* Index the next opened file will use. Persisting this lets a resumed run
+   continue the name ring instead of truncating a file it already wrote. */
+uint32_t app_acq_file_index(void);
 /* 1..APP_ACQ_CH_MAX; refused while a capture is running. */
 int app_acq_set_channels(uint32_t nch);
 uint32_t app_acq_channels(void);

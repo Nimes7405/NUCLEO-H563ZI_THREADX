@@ -955,6 +955,12 @@ static void console_sd_locked(const char *arg)
     const char *rest = arg + 6;
     int rc;
 
+    if (app_acq_running() != 0)
+    {
+      app_log_printf("ERR sd-format-while-capturing: stop the capture first\r\n");
+      return;
+    }
+
     while (*rest == ' ')
     {
       rest++;
@@ -1059,6 +1065,14 @@ static void console_sd_locked(const char *arg)
     while (*cursor == ' ')
     {
       cursor++;
+    }
+    /* Deleting the file the writer has open corrupts the allocation table: the
+       entry disappears while clusters are still being appended. Costly enough
+       to have wedged a card once, so refuse instead of trusting the caller. */
+    if (app_acq_running() != 0)
+    {
+      app_log_printf("ERR sd-rm-while-capturing: stop the capture first\r\n");
+      return;
     }
     (void)app_fxsd_lock();
     app_log_printf("SD rm name=%s rc=%d\r\n", cursor, app_fxsd_delete(cursor));
